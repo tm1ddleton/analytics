@@ -9,6 +9,7 @@ pub mod dag;
 pub mod analytics;
 pub mod push_mode;
 pub mod replay;
+pub mod server;
 
 #[cfg(test)]
 mod integration_tests;
@@ -32,4 +33,5 @@ pub use analytics::{
 };
 pub use push_mode::{CircularBuffer, PushModeEngine, PushError, InitError, NodeState, NodePushState};
 pub use replay::{ReplayEngine, ReplayError, ReplayResult};
+pub use server::{run_server, ServerConfig, AppState, ApiError};
 
