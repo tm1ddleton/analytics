@@ -9,12 +9,12 @@
 5. [x] Push-Mode Analytics Engine — Implement incremental computation system where analytics update automatically when new data arrives, with dependency propagation through the DAG `XL`
 6. [x] Basic Analytics Library — Create foundational analytics calculations (e.g., moving averages, returns, volatility) that work in push mode `M`
 7. [x] High-Speed Data Replay System — Implement replay engine that reads historical data from SQLite and feeds it into push-mode analytics at configurable high speed (faster than real-time) `M`
-8. [ ] REST API Server with WebSocket/SSE — Build HTTP server with REST endpoints for querying analytics and WebSocket or Server-Sent Events for real-time push updates to UI `M`
-9. [ ] React UI Dashboard — Create React frontend that connects to REST API, displays real-time analytics updates via WebSocket/SSE, shows asset data visualization, and includes controls for replay speed and asset selection `L`
+8. [ ] Pull-Mode Analytics Engine — Implement time-series generation system that computes complete historical analytics on-demand for specified date ranges `L`
+9. [ ] REST API Server with WebSocket/SSE — Build HTTP server with REST endpoints for querying analytics and WebSocket or Server-Sent Events for real-time push updates to UI `M`
+10. [ ] React UI Dashboard — Create React frontend that connects to REST API, displays real-time analytics updates via WebSocket/SSE, shows asset data visualization, and includes controls for replay speed and asset selection `L`
 
 ## Post-POC Development
 
-10. [ ] Pull-Mode Analytics Engine — Implement time-series generation system that computes complete historical analytics on-demand for specified date ranges `L`
 11. [ ] Embedded Rust API — Design and implement clean, ergonomic Rust API for using the engine directly in Rust applications with comprehensive documentation `M`
 12. [ ] Python PyO3 Bindings — Create Python bindings using PyO3 that expose core Rust API functions, asset management, and analytics computation to Python `L`
 13. [ ] Polars Dataframe Integration — Implement conversion layer that exports analytics results as Polars dataframes in Python bindings and REST API responses `S`
@@ -26,9 +26,9 @@
 19. [ ] Comprehensive Testing Suite — Create unit tests, integration tests, and performance benchmarks covering all access modes and computation patterns `M`
 
 > Notes
-> - POC Phase (1-9) focuses on demonstrating push-mode analytics with high-speed replay in a React UI
+> - POC Phase (1-10) focuses on demonstrating both push-mode and pull-mode analytics with high-speed replay in a React UI
 > - Order items by technical dependencies and product architecture
 > - Each item should represent an end-to-end (library + API + integration) functional and testable feature
 > - POC uses SQLite for simplicity; production will require more sophisticated storage
-> - React UI demonstrates real-time analytics updates during high-speed replay
+> - React UI demonstrates real-time analytics updates during high-speed replay and on-demand batch computation
 
