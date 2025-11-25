@@ -5,6 +5,7 @@ pub mod future;
 pub mod time_series;
 pub mod sqlite_provider;
 pub mod yahoo_finance;
+pub mod dag;
 
 #[cfg(test)]
 mod integration_tests;
