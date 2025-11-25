@@ -108,27 +108,30 @@ Total Tasks: 7 task groups
 #### Task Group 3: Cycle Detection Implementation
 **Dependencies:** Task Group 2
 
-- [ ] 3.0 Complete cycle detection implementation
-  - [ ] 3.1 Write 2-8 focused tests for cycle detection
+- [x] 3.0 Complete cycle detection implementation
+  - [x] 3.1 Write 2-8 focused tests for cycle detection
     - Test detecting cycles when adding new node
     - Test detecting cycles in existing DAG
     - Test valid DAG (no cycles) passes detection
     - Test error messages for cycle detection
-  - [ ] 3.2 Implement cycle detection algorithm
+  - [x] 3.2 Implement cycle detection algorithm
     - Use selected library's cycle detection or implement custom algorithm
     - Detect cycles when adding new nodes with dependencies
     - Detect cycles in existing DAG structure
     - Return clear error messages when cycle is detected
-  - [ ] 3.3 Integrate cycle detection with node addition
+    - Implemented via daggy's built-in cycle detection in add_edge method
+  - [x] 3.3 Integrate cycle detection with node addition
     - Check for cycles before adding new node
     - Prevent DAG from entering invalid state
     - Return appropriate error if cycle would be created
     - Maintain DAG integrity
-  - [ ] 3.4 Create cycle detection error types
+    - Cycle detection integrated in add_edge method - prevents cycles at construction time
+  - [x] 3.4 Create cycle detection error types
     - Define error enum for cycle detection failures
     - Include clear error messages indicating which nodes form the cycle
     - Follow existing error handling patterns (e.g., DownloadError structure)
-  - [ ] 3.5 Ensure cycle detection tests pass
+    - Created DagError::CycleDetected variant with clear error messages
+  - [x] 3.5 Ensure cycle detection tests pass
     - Run ONLY the 2-8 tests written in 3.1
     - Verify cycles are detected correctly
     - Verify valid DAGs pass detection
@@ -145,27 +148,30 @@ Total Tasks: 7 task groups
 #### Task Group 4: Topological Sorting Implementation
 **Dependencies:** Task Group 2
 
-- [ ] 4.0 Complete topological sorting implementation
-  - [ ] 4.1 Write 2-8 focused tests for topological sorting
+- [x] 4.0 Complete topological sorting implementation
+  - [x] 4.1 Write 2-8 focused tests for topological sorting
     - Test topological sort for simple linear DAG
     - Test topological sort for DAG with parallel branches
     - Test edge cases: empty DAG, single node, disconnected components
     - Test querying execution order without executing
-  - [ ] 4.2 Implement topological sorting algorithm
+  - [x] 4.2 Implement topological sorting algorithm
     - Use selected library's topological sort or implement custom algorithm
     - Generate valid execution sequence respecting all dependencies
     - Handle edge cases: empty DAG, single node, disconnected components
     - Return ordered list of nodes for execution
-  - [ ] 4.3 Implement execution order query method
+    - Implemented using Kahn's algorithm with petgraph API
+  - [x] 4.3 Implement execution order query method
     - Support querying execution order without executing nodes
     - Return execution sequence as vector of node identifiers
     - Handle invalid DAG states gracefully
     - Provide clear error messages if DAG is invalid
-  - [ ] 4.4 Integrate topological sort with DAG structure
+    - Created execution_order() and execution_order_immutable() methods
+  - [x] 4.4 Integrate topological sort with DAG structure
     - Recompute topological sort after DAG modifications
     - Cache execution order when DAG is unchanged
     - Invalidate cache when nodes or edges are added/removed
-  - [ ] 4.5 Ensure topological sorting tests pass
+    - Implemented caching with automatic invalidation on structural changes
+  - [x] 4.5 Ensure topological sorting tests pass
     - Run ONLY the 2-8 tests written in 4.1
     - Verify execution order respects all dependencies
     - Verify edge cases are handled correctly
@@ -182,28 +188,31 @@ Total Tasks: 7 task groups
 #### Task Group 5: Parallel Execution Support
 **Dependencies:** Task Groups 2, 4
 
-- [ ] 5.0 Complete parallel execution support
-  - [ ] 5.1 Write 2-8 focused tests for parallel execution
+- [x] 5.0 Complete parallel execution support
+  - [x] 5.1 Write 2-8 focused tests for parallel execution
     - Test parallel execution of independent nodes
     - Test sequential execution of dependent nodes
     - Test thread-safe execution with multiple concurrent nodes
     - Test execution with mixed parallel and sequential nodes
-  - [ ] 5.2 Implement execution engine using tokio
+  - [x] 5.2 Implement execution engine using tokio
     - Use tokio for async runtime and concurrent computation
     - Execute nodes in parallel when possible (independent nodes)
     - Execute nodes sequentially when dependencies require it
     - Ensure thread-safe execution when multiple nodes run concurrently
-  - [ ] 5.3 Implement node execution logic
+    - Implemented execute() method with tokio::spawn for parallel execution
+  - [x] 5.3 Implement node execution logic
     - Create execution context for nodes
     - Pass input data from dependency nodes to dependent nodes
     - Handle node outputs (single output, may be collection)
     - Store execution results for use by dependent nodes
-  - [ ] 5.4 Integrate parallel execution with topological sort
+    - Created NodeOutput enum with Single, Collection, Scalar, and None variants
+  - [x] 5.4 Integrate parallel execution with topological sort
     - Use topological sort to determine execution order
     - Identify independent nodes that can run in parallel
     - Schedule parallel execution of independent nodes
     - Wait for dependencies before executing dependent nodes
-  - [ ] 5.5 Ensure parallel execution tests pass
+    - execute() method uses topological sort and executes nodes in levels
+  - [x] 5.5 Ensure parallel execution tests pass
     - Run ONLY the 2-8 tests written in 5.1
     - Verify independent nodes execute in parallel
     - Verify dependent nodes execute in correct order

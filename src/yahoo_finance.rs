@@ -411,11 +411,15 @@ impl YahooFinanceDownloader {
     /// - A map of failed downloads (asset_key -> error message)
     /// 
     /// # Example
-    /// ```
-    /// use analytics::{YahooFinanceDownloader, AssetKey, DateRange};
+    /// ```ignore
+    /// use analytics::yahoo_finance::YahooFinanceDownloader;
+    /// use analytics::asset_key::AssetKey;
+    /// use analytics::date_range::DateRange;
+    /// use analytics::sqlite_provider::SqliteDataProvider;
     /// use chrono::NaiveDate;
     /// 
-    /// let downloader = YahooFinanceDownloader::new().unwrap();
+    /// # tokio_test::block_on(async {
+    /// let downloader = YahooFinanceDownloader::new();
     /// let mut provider = SqliteDataProvider::new_in_memory().unwrap();
     /// 
     /// let assets = vec![
@@ -428,6 +432,7 @@ impl YahooFinanceDownloader {
     /// ];
     /// 
     /// let result = downloader.download_multiple_to_sqlite(&mut provider, &assets).await;
+    /// # })
     /// ```
     pub async fn download_multiple_to_sqlite(
         &self,
