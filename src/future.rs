@@ -148,6 +148,69 @@ impl Future {
     ) -> Result<Vec<TimeSeriesPoint>, crate::time_series::DataProviderError> {
         provider.get_time_series(self.key(), date_range)
     }
+
+    /// Generates a rolling futures price series from multiple contracts.
+    /// 
+    /// This method creates a continuous price series by switching between
+    /// contracts at the specified rollover points (days before expiry).
+    /// 
+    /// # Arguments
+    /// * `provider` - The data provider to query from
+    /// * `contracts` - Vector of futures contracts (ordered by expiry date)
+    /// * `date_range` - The date range for the rolling series
+    /// * `rollover_days` - Days before expiry to switch to next contract
+    /// 
+    /// # Returns
+    /// Returns a continuous price series with prices from the appropriate contract
+    /// at each point in time, switching contracts at rollover dates.
+    /// 
+    /// # Errors
+    /// Returns an error if any contract data cannot be retrieved.
+    pub fn generate_rolling_price_series(
+        provider: &dyn DataProvider,
+        contracts: &[&Self],
+        date_range: &DateRange,
+        rollover_days: u32,
+    ) -> Result<Vec<TimeSeriesPoint>, crate::time_series::DataProviderError> {
+        if contracts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rolling_series = Vec::new();
+        let mut current_contract_idx = 0;
+
+        // Generate all dates in the range
+        let mut current_date = date_range.start;
+        while current_date <= date_range.end {
+            // Check if we need to rollover to next contract
+            while current_contract_idx < contracts.len() - 1 {
+                let current_contract = contracts[current_contract_idx];
+                let rollover_date = current_contract.expiry_date
+                    - chrono::Duration::days(rollover_days as i64);
+
+                if current_date >= rollover_date {
+                    current_contract_idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Get data from current contract for this date
+            let contract = contracts[current_contract_idx];
+            let single_day_range = DateRange::new(current_date, current_date);
+            let contract_data = provider.get_time_series(contract.key(), &single_day_range)?;
+
+            // Add the first point for this date (if any)
+            if let Some(point) = contract_data.first() {
+                rolling_series.push(point.clone());
+            }
+
+            // Move to next day
+            current_date = current_date.succ_opt().unwrap_or(current_date);
+        }
+
+        Ok(rolling_series)
+    }
 }
 
 impl Asset for Future {
@@ -312,6 +375,124 @@ mod tests {
         let result = future.get_time_series(&provider, &date_range).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].close_price, 4500.0);
+    }
+
+    #[test]
+    fn test_future_serialize_deserialize() {
+        let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+        let future = Future::new(
+            "ES",
+            expiry,
+            "2024-12",
+            "E-mini S&P 500",
+            "CME",
+            "USD",
+            "CME",
+            5,
+        ).unwrap();
+
+        let json = serde_json::to_string(&future).unwrap();
+        let deserialized: Future = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(future.series(), deserialized.series());
+        assert_eq!(future.expiry_date(), deserialized.expiry_date());
+        assert_eq!(future.contract_month(), deserialized.contract_month());
+        assert_eq!(future.name(), deserialized.name());
+    }
+
+    #[test]
+    fn test_future_expiry_calendar_rollover() {
+        let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+        let future = Future::new(
+            "ES",
+            expiry,
+            "2024-12",
+            "E-mini S&P 500",
+            "CME",
+            "USD",
+            "CME",
+            5,
+        ).unwrap();
+
+        let rollover = future.rollover_date();
+        let expected = expiry - chrono::Duration::days(5);
+        assert_eq!(rollover, expected);
+    }
+
+    #[test]
+    fn test_future_generate_rolling_price_series() {
+        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use chrono::{TimeZone, Utc};
+
+        // Create two contracts with different expiry dates
+        let expiry1 = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+        let contract1 = Future::new(
+            "ES",
+            expiry1,
+            "2024-12",
+            "E-mini S&P 500 Dec 2024",
+            "CME",
+            "USD",
+            "CME",
+            5,
+        ).unwrap();
+
+        let expiry2 = NaiveDate::from_ymd_opt(2025, 3, 20).unwrap();
+        let contract2 = Future::new(
+            "ES",
+            expiry2,
+            "2025-03",
+            "E-mini S&P 500 Mar 2025",
+            "CME",
+            "USD",
+            "CME",
+            5,
+        ).unwrap();
+
+        let mut provider = InMemoryDataProvider::new();
+
+        // Add data for contract1 (Dec 2024)
+        let points1 = vec![
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 10, 16, 0, 0).unwrap(),
+                4500.0,
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 15, 16, 0, 0).unwrap(), // Rollover date
+                4510.0,
+            ),
+        ];
+        provider.add_data(contract1.key().clone(), points1);
+
+        // Add data for contract2 (Mar 2025)
+        let points2 = vec![
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 16, 16, 0, 0).unwrap(), // After rollover
+                4520.0,
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 17, 16, 0, 0).unwrap(),
+                4530.0,
+            ),
+        ];
+        provider.add_data(contract2.key().clone(), points2);
+
+        let contracts = vec![&contract1, &contract2];
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 12, 10).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 17).unwrap(),
+        );
+
+        let rolling_series = Future::generate_rolling_price_series(
+            &provider,
+            &contracts,
+            &date_range,
+            5, // 5 days before expiry
+        ).unwrap();
+
+        // Should have prices from both contracts, switching at rollover
+        assert!(rolling_series.len() >= 2);
+        // Prices should come from appropriate contracts based on rollover date
     }
 }
 

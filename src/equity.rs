@@ -155,6 +155,53 @@ impl Equity {
     ) -> Result<Vec<TimeSeriesPoint>, crate::time_series::DataProviderError> {
         provider.get_time_series(self.key(), date_range)
     }
+
+    /// Applies corporate actions to a price data point.
+    /// 
+    /// This is a rudimentary implementation for POC that adjusts prices
+    /// based on corporate actions that occurred before or on the given date.
+    /// 
+    /// # Arguments
+    /// * `price` - The original price
+    /// * `date` - The date of the price point
+    /// 
+    /// # Returns
+    /// Returns the adjusted price after applying relevant corporate actions.
+    pub fn apply_corporate_actions(&self, price: f64, date: NaiveDate) -> f64 {
+        let mut adjusted_price = price;
+
+        // Apply splits (price adjustment)
+        for action in &self.corporate_actions {
+            if let CorporateAction::Split { ratio, effective_date } = action {
+                if date >= *effective_date {
+                    // Adjust price for split (divide by ratio)
+                    adjusted_price = adjusted_price / ratio;
+                }
+            }
+        }
+
+        adjusted_price
+    }
+
+    /// Applies corporate actions to a vector of time-series points.
+    /// 
+    /// # Arguments
+    /// * `points` - Vector of time-series points to adjust
+    /// 
+    /// # Returns
+    /// Returns a new vector with adjusted prices.
+    pub fn apply_corporate_actions_to_series(&self, points: Vec<TimeSeriesPoint>) -> Vec<TimeSeriesPoint> {
+        points
+            .into_iter()
+            .map(|point| {
+                let adjusted_price = self.apply_corporate_actions(
+                    point.close_price,
+                    point.timestamp.date_naive(),
+                );
+                TimeSeriesPoint::new(point.timestamp, adjusted_price)
+            })
+            .collect()
+    }
 }
 
 impl Asset for Equity {
@@ -304,6 +351,89 @@ mod tests {
         let result = equity.get_time_series(&provider, &date_range).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].close_price, 150.0);
+    }
+
+    #[test]
+    fn test_equity_serialize_deserialize() {
+        let equity = Equity::new(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        let json = serde_json::to_string(&equity).unwrap();
+        let deserialized: Equity = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(equity.name(), deserialized.name());
+        assert_eq!(equity.exchange(), deserialized.exchange());
+        assert_eq!(equity.currency(), deserialized.currency());
+        assert_eq!(equity.sector(), deserialized.sector());
+    }
+
+    #[test]
+    fn test_equity_apply_corporate_actions_split() {
+        let split = CorporateAction::Split {
+            ratio: 2.0,
+            effective_date: NaiveDate::from_ymd_opt(2020, 8, 31).unwrap(),
+        };
+
+        let equity = Equity::with_corporate_actions(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+            vec![split],
+        ).unwrap();
+
+        // Price before split should be unchanged
+        let price_before = equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 8, 30).unwrap());
+        assert_eq!(price_before, 200.0);
+
+        // Price after split should be adjusted (divided by ratio)
+        let price_after = equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 9, 1).unwrap());
+        assert_eq!(price_after, 100.0);
+    }
+
+    #[test]
+    fn test_equity_apply_corporate_actions_to_series() {
+        use chrono::{TimeZone, Utc};
+
+        let split = CorporateAction::Split {
+            ratio: 2.0,
+            effective_date: NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
+        };
+
+        let equity = Equity::with_corporate_actions(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+            vec![split],
+        ).unwrap();
+
+        let points = vec![
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
+                200.0, // Before split
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
+                200.0, // On split date
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(),
+                200.0, // After split
+            ),
+        ];
+
+        let adjusted = equity.apply_corporate_actions_to_series(points);
+        assert_eq!(adjusted[0].close_price, 200.0); // Before split
+        assert_eq!(adjusted[1].close_price, 100.0); // On split date
+        assert_eq!(adjusted[2].close_price, 100.0); // After split
     }
 }
 

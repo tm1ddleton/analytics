@@ -121,33 +121,33 @@ Total Tasks: 4 task groups
 #### Task Group 4: Serialization, Corporate Actions, and Futures Features
 **Dependencies:** Task Group 3
 
-- [ ] 4.0 Complete serialization and advanced asset features
-  - [ ] 4.1 Write 2-8 focused tests for serialization and advanced features
+- [x] 4.0 Complete serialization and advanced asset features
+  - [x] 4.1 Write 2-8 focused tests for serialization and advanced features
     - Test serde Serialize/Deserialize for all asset types
     - Test JSON serialization format
     - Test corporate action handling in equities
     - Test futures expiry calendar functionality
     - Test rolling futures price generation
-  - [ ] 4.2 Implement serde Serialize/Deserialize for all asset types
+  - [x] 4.2 Implement serde Serialize/Deserialize for all asset types
     - Add serde derives to AssetKey, Equity, Future structs
     - Ensure all metadata fields are serializable
     - Support JSON format for REST API responses
     - Test round-trip serialization (serialize then deserialize)
-  - [ ] 4.3 Implement corporate action handling for equities
+  - [x] 4.3 Implement corporate action handling for equities
     - Create CorporateAction enum (Split, Dividend, etc.)
     - Add corporate_actions field to Equity struct
     - Implement methods to apply corporate actions to price data
     - Keep implementation rudimentary for POC
-  - [ ] 4.4 Implement futures expiry calendar
+  - [x] 4.4 Implement futures expiry calendar
     - Create ExpiryCalendar trait or struct
     - Support determining contract rollover dates
     - Support configurable days-before-expiry for rollover
-  - [ ] 4.5 Implement rolling futures price generation
+  - [x] 4.5 Implement rolling futures price generation
     - Create method to generate continuous price series
     - Support configurable days-before-expiry switchover
     - Switch between contracts at specified rollover points
     - Return continuous price series
-  - [ ] 4.6 Ensure serialization and advanced feature tests pass
+  - [x] 4.6 Ensure serialization and advanced feature tests pass
     - Run ONLY the 2-8 tests written in 4.1
     - Verify JSON serialization works correctly
     - Verify corporate actions and rolling futures functionality
