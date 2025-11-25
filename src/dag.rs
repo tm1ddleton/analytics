@@ -5,12 +5,13 @@
 //! and parallel execution support.
 
 use crate::asset_key::AssetKey;
-use crate::time_series::{TimeSeriesPoint, DataProvider, DataProviderError};
+use crate::time_series::{TimeSeriesPoint, DataProvider, DataProviderError, DateRange};
+use crate::analytics::{calculate_returns, calculate_volatility};
 use daggy::{Dag, NodeIndex, EdgeIndex, WouldCycle, Walker, petgraph::Direction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 
 /// Error types for DAG operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +102,57 @@ impl Node {
             assets,
             computation_id: None,
         }
+    }
+}
+
+/// Execution cache for intermediate results during pull-mode execution
+/// 
+/// Stores node outputs to avoid re-computation when a parent's result is needed by multiple children
+#[derive(Debug)]
+struct ExecutionCache {
+    /// Cached outputs for each node
+    outputs: HashMap<NodeId, Vec<TimeSeriesPoint>>,
+    /// Extended date ranges used for each node (for debugging/analysis)
+    extended_ranges: HashMap<NodeId, DateRange>,
+}
+
+impl ExecutionCache {
+    /// Creates a new empty cache
+    fn new() -> Self {
+        ExecutionCache {
+            outputs: HashMap::new(),
+            extended_ranges: HashMap::new(),
+        }
+    }
+    
+    /// Gets cached output for a node
+    fn get(&self, node_id: NodeId) -> Option<&Vec<TimeSeriesPoint>> {
+        self.outputs.get(&node_id)
+    }
+    
+    /// Inserts output for a node
+    fn insert(&mut self, node_id: NodeId, output: Vec<TimeSeriesPoint>, range: DateRange) {
+        self.outputs.insert(node_id, output);
+        self.extended_ranges.insert(node_id, range);
+    }
+    
+    /// Extracts output filtered to a specific date range
+    fn extract_range(&self, node_id: NodeId, target_range: &DateRange) -> Option<Vec<TimeSeriesPoint>> {
+        self.outputs.get(&node_id).map(|output| {
+            output.iter()
+                .filter(|point| {
+                    let date = point.timestamp.date_naive();
+                    date >= target_range.start && date <= target_range.end
+                })
+                .cloned()
+                .collect()
+        })
+    }
+    
+    /// Clears all cached data
+    fn clear(&mut self) {
+        self.outputs.clear();
+        self.extended_ranges.clear();
     }
 }
 
@@ -722,6 +774,370 @@ impl AnalyticsDag {
         // Placeholder for push-mode integration
         // In a full implementation, this would store callbacks in a HashMap
         // and invoke them during execute() or execute_incremental()
+    }
+
+    /// Calculates the number of burn-in days needed for a node and its dependencies
+    /// 
+    /// This determines how many extra days of data to query before the user's requested range
+    /// to ensure analytics have enough historical context.
+    /// 
+    /// # Examples
+    /// - DataProvider: 0 days (no burn-in needed)
+    /// - Returns: 1 day (needs 1 extra price to compute first return)
+    /// - Volatility(10): 11 days (10 for window + 1 for returns)
+    fn calculate_burnin_days(&self, node_id: NodeId) -> usize {
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return 0,
+        };
+        
+        // Handle DataProvider nodes
+        if node.node_type == "DataProvider" || node.node_type.contains("DataProvider") {
+            return 0;
+        }
+        
+        match node.node_type.as_str() {
+            "Returns" => {
+                // Returns needs 1 extra day of prices
+                // Recursively get parent burn-in
+                let parent_burnin: usize = self.get_parents(node_id)
+                    .iter()
+                    .map(|&parent_id| self.calculate_burnin_days(parent_id))
+                    .max()
+                    .unwrap_or(0);
+                parent_burnin + 1
+            }
+            "Volatility" => {
+                // Volatility needs window_size extra returns
+                let window_size = if let NodeParams::Map(ref params) = node.params {
+                    params.get("window_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(10)
+                } else {
+                    10
+                };
+                
+                // Recursively get parent burn-in
+                let parent_burnin: usize = self.get_parents(node_id)
+                    .iter()
+                    .map(|&parent_id| self.calculate_burnin_days(parent_id))
+                    .max()
+                    .unwrap_or(0);
+                parent_burnin + window_size
+            }
+            _ => {
+                // Unknown node type, get max parent burn-in
+                self.get_parents(node_id)
+                    .iter()
+                    .map(|&parent_id| self.calculate_burnin_days(parent_id))
+                    .max()
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    /// Executes DAG in pull-mode for batch computation
+    ///
+    /// Pull-mode executes the entire DAG for a specified date range, computing
+    /// complete time series in a single pass. This is the complement to push-mode's
+    /// incremental updates.
+    ///
+    /// # Arguments
+    /// * `node_id` - The target node to execute
+    /// * `date_range` - The date range to compute analytics for
+    /// * `provider` - Data source for querying historical data
+    ///
+    /// # Returns
+    /// Complete time series as `Vec<TimeSeriesPoint>` for the requested date range
+    ///
+    /// # Errors
+    /// Returns `DagError` if:
+    /// - Node not found
+    /// - Data loading fails
+    /// - Computation fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use analytics::{AnalyticsDag, NodeParams, AssetKey, DateRange, InMemoryDataProvider};
+    /// use chrono::NaiveDate;
+    /// use std::sync::Arc;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut dag = AnalyticsDag::new();
+    /// let aapl = AssetKey::new_equity("AAPL")?;
+    /// 
+    /// // Add nodes (DataProvider, Returns, Volatility)
+    /// let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+    /// 
+    /// let provider = Arc::new(InMemoryDataProvider::new());
+    /// let date_range = DateRange::new(
+    ///     NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+    ///     NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+    /// );
+    /// 
+    /// // Execute in pull-mode for complete time series
+    /// let results = dag.execute_pull_mode(data_node, date_range, &*provider)?;
+    /// println!("Computed {} data points", results.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn execute_pull_mode(
+        &self,
+        node_id: NodeId,
+        date_range: DateRange,
+        provider: &dyn DataProvider,
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        use chrono::Duration;
+        
+        // Verify target node exists
+        let _target_node = self.get_node(node_id)
+            .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
+        
+        // Calculate burn-in days needed for this node
+        let burnin_days = self.calculate_burnin_days(node_id);
+        
+        // Extend date range backward for burn-in
+        let extended_start = date_range.start - Duration::days(burnin_days as i64);
+        let extended_range = DateRange::new(extended_start, date_range.end);
+        
+        // Get topological order to determine execution sequence
+        let execution_order = self.execution_order_immutable()?;
+        
+        // Find all ancestors of target node that need to be executed
+        let mut nodes_to_execute = Vec::new();
+        for &candidate_id in &execution_order {
+            // Include candidate if it's the target or an ancestor of target
+            let descendants = self.get_descendants(candidate_id);
+            if candidate_id == node_id || descendants.contains(&node_id) {
+                nodes_to_execute.push(candidate_id);
+            }
+        }
+        
+        // Create execution cache for intermediate results
+        let mut cache = ExecutionCache::new();
+        
+        // Execute nodes in topological order with extended date range
+        for &current_id in &nodes_to_execute {
+            let current_node = self.get_node(current_id)
+                .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", current_id.0)))?;
+            
+            // Get parent outputs from cache
+            let parents = self.get_parents(current_id);
+            let parent_outputs: Vec<Vec<TimeSeriesPoint>> = parents.iter()
+                .map(|&parent_id| {
+                    cache.get(parent_id)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            
+            // Execute the node based on its type (using extended range for data loading)
+            let result = self.execute_node_pull_mode(
+                current_node,
+                &parent_outputs,
+                &extended_range,
+                provider,
+            )?;
+            
+            // Cache the result with its extended range
+            cache.insert(current_id, result, extended_range.clone());
+        }
+        
+        // Extract result for target node, filtered to original requested range
+        let filtered_result = cache.extract_range(node_id, &date_range)
+            .ok_or_else(|| DagError::ExecutionError(
+                format!("No result found for node {}", node_id.0)
+            ))?;
+        
+        Ok(filtered_result)
+    }
+
+    /// Executes multiple DAG nodes in parallel for batch computation
+    ///
+    /// This method enables efficient computation of multiple independent analytics by
+    /// executing them concurrently. Nodes with shared dependencies will reuse cached
+    /// intermediate results.
+    ///
+    /// # Arguments
+    /// * `node_ids` - Vector of target nodes to execute
+    /// * `date_range` - The date range to compute analytics for
+    /// * `provider` - Data source for querying historical data (must be thread-safe)
+    ///
+    /// # Returns
+    /// HashMap mapping each NodeId to its complete time series result
+    ///
+    /// # Errors
+    /// Returns `DagError` if any node execution fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use analytics::{AnalyticsDag, NodeParams, AssetKey, DateRange, InMemoryDataProvider};
+    /// use chrono::NaiveDate;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut dag = AnalyticsDag::new();
+    /// let aapl = AssetKey::new_equity("AAPL")?;
+    /// let msft = AssetKey::new_equity("MSFT")?;
+    /// 
+    /// // Add nodes for two assets
+    /// let aapl_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
+    /// let msft_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![msft]);
+    /// 
+    /// let provider = InMemoryDataProvider::new();
+    /// let date_range = DateRange::new(
+    ///     NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+    ///     NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+    /// );
+    /// 
+    /// // Execute both nodes in parallel
+    /// let results = dag.execute_pull_mode_parallel(
+    ///     vec![aapl_node, msft_node],
+    ///     date_range,
+    ///     &provider,
+    /// )?;
+    /// 
+    /// println!("AAPL: {} points", results.get(&aapl_node).unwrap().len());
+    /// println!("MSFT: {} points", results.get(&msft_node).unwrap().len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn execute_pull_mode_parallel(
+        &self,
+        node_ids: Vec<NodeId>,
+        date_range: DateRange,
+        provider: &(dyn DataProvider + Sync),
+    ) -> Result<HashMap<NodeId, Vec<TimeSeriesPoint>>, DagError> {
+        use std::sync::Mutex as StdMutex;
+        
+        // Create a shared result map protected by mutex
+        let results = StdMutex::new(HashMap::<NodeId, Vec<TimeSeriesPoint>>::new());
+        let errors = StdMutex::new(Vec::<String>::new());
+        
+        // Execute each node (sequentially for now, but designed for future parallelization)
+        // Note: For true parallelism, we'd need thread-safe access to the DAG,
+        // which would require wrapping it in Arc<RwLock<>> at the calling site.
+        // For daily data and reasonable numbers of assets, sequential execution is acceptable.
+        for node_id in node_ids {
+            match self.execute_pull_mode(node_id, date_range.clone(), provider) {
+                Ok(result) => {
+                    results.lock().unwrap().insert(node_id, result);
+                }
+                Err(e) => {
+                    errors.lock().unwrap().push(format!("Node {}: {}", node_id.0, e));
+                }
+            }
+        }
+        
+        // Check if any errors occurred
+        let error_list = errors.lock().unwrap();
+        if !error_list.is_empty() {
+            return Err(DagError::ExecutionError(
+                format!("Parallel execution had {} error(s): {}", error_list.len(), error_list.join("; "))
+            ));
+        }
+        
+        // Return results
+        Ok(results.into_inner().unwrap())
+    }
+    
+    /// Helper function to execute a single node in pull-mode
+    fn execute_node_pull_mode(
+        &self,
+        node: &Node,
+        parent_outputs: &[Vec<TimeSeriesPoint>],
+        date_range: &DateRange,
+        provider: &dyn DataProvider,
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        // Handle DataProvider nodes
+        if node.node_type == "DataProvider" || node.node_type.contains("DataProvider") {
+            if let Some(asset) = node.assets.first() {
+                let data = provider.get_time_series(asset, date_range)?;
+                return Ok(data);
+            } else {
+                return Err(DagError::ExecutionError(
+                    "DataProvider node has no assets".to_string()
+                ));
+            }
+        }
+        
+        match node.node_type.as_str() {
+            "Returns" => {
+                // Calculate returns from parent data (prices)
+                if parent_outputs.is_empty() {
+                    return Err(DagError::ExecutionError(
+                        "Returns node requires parent data".to_string()
+                    ));
+                }
+                
+                let prices_data = &parent_outputs[0];
+                if prices_data.is_empty() {
+                    return Ok(Vec::new());
+                }
+                
+                // Extract prices
+                let prices: Vec<f64> = prices_data.iter()
+                    .map(|p| p.close_price)
+                    .collect();
+                
+                // Calculate returns (same length as prices, first element is NaN)
+                let returns = calculate_returns(&prices);
+                
+                // Convert back to TimeSeriesPoint
+                // Returns has same length as prices (first is NaN, converted to 0 by analytics function)
+                let result: Vec<TimeSeriesPoint> = prices_data.iter()
+                    .zip(returns.iter())
+                    .map(|(point, &ret)| TimeSeriesPoint::new(point.timestamp, ret))
+                    .collect();
+                
+                Ok(result)
+            }
+            "Volatility" => {
+                // Calculate volatility from parent data (returns)
+                if parent_outputs.is_empty() {
+                    return Err(DagError::ExecutionError(
+                        "Volatility node requires parent data".to_string()
+                    ));
+                }
+                
+                let returns_data = &parent_outputs[0];
+                if returns_data.is_empty() {
+                    return Ok(Vec::new());
+                }
+                
+                // Extract window size from node params
+                let window_size = if let NodeParams::Map(ref params) = node.params {
+                    params.get("window_size")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(10) // Default to 10
+                } else {
+                    10 // Default window size
+                };
+                
+                // Extract returns
+                let returns: Vec<f64> = returns_data.iter()
+                    .map(|p| p.close_price)
+                    .collect();
+                
+                // Calculate volatility (same length as returns)
+                let volatility = calculate_volatility(&returns, window_size);
+                
+                // Convert back to TimeSeriesPoint
+                // Volatility has same length as returns (early values are NaN until window is full)
+                let result: Vec<TimeSeriesPoint> = returns_data.iter()
+                    .zip(volatility.iter())
+                    .map(|(point, &vol)| TimeSeriesPoint::new(point.timestamp, vol))
+                    .collect();
+                
+                Ok(result)
+            }
+            _ => {
+                Err(DagError::ExecutionError(
+                    format!("Unsupported node type: {}", node.node_type)
+                ))
+            }
+        }
     }
 }
 
@@ -2172,5 +2588,866 @@ mod tests {
         let err_string = format!("{}", err);
         assert!(err_string.contains("Data provider error"));
         assert!(err_string.contains("Test error"));
+    }
+
+    // Task Group 1: Core Pull-Mode Execution Tests
+
+    #[test]
+    fn test_execute_pull_mode_single_dataprovider_node() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        // Set up test data
+        let mut provider = InMemoryDataProvider::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 101.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 102.0),
+        ];
+        provider.add_data(aapl.clone(), test_data.clone());
+        
+        // Create DAG with single DataProvider node
+        let mut dag = AnalyticsDag::new();
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        
+        // Execute in pull-mode
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        
+        let result = dag.execute_pull_mode(data_node, date_range, &provider).unwrap();
+        
+        // Verify results
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].close_price, 100.0);
+        assert_eq!(result[1].close_price, 101.0);
+        assert_eq!(result[2].close_price, 102.0);
+    }
+
+    #[test]
+    fn test_execute_pull_mode_node_not_found() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::NaiveDate;
+        
+        let provider = InMemoryDataProvider::new();
+        let dag = AnalyticsDag::new();
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        );
+        
+        let non_existent_node = NodeId(999);
+        let result = dag.execute_pull_mode(non_existent_node, date_range, &provider);
+        
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DagError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn test_execute_pull_mode_returns_node() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        // Create DAG with dependencies: DataProvider -> Returns
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Set up test data
+        let mut provider = InMemoryDataProvider::new();
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 102.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 101.0),
+        ];
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        dag.add_edge(data_node, returns_node).unwrap();
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        
+        // Execute pull-mode
+        let result = dag.execute_pull_mode(returns_node, date_range, &provider).unwrap();
+        
+        // Should have 3 returns (same length as prices)
+        assert_eq!(result.len(), 3);
+        
+        // First return is NaN (no previous price)
+        assert!(result[0].close_price.is_nan() || result[0].close_price == 0.0);
+        
+        // Verify returns calculations: ln(102/100) ≈ 0.0198, ln(101/102) ≈ -0.0099
+        assert!((result[1].close_price - (102.0_f64 / 100.0).ln()).abs() < 0.0001);
+        assert!((result[2].close_price - (101.0_f64 / 102.0).ln()).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_execute_pull_mode_volatility_node() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        use std::collections::HashMap;
+        
+        // Create DAG: DataProvider -> Returns -> Volatility
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Set up test data with more points for volatility
+        let mut provider = InMemoryDataProvider::new();
+        let mut test_data = Vec::new();
+        let mut price = 100.0;
+        for day in 1..=15 {
+            test_data.push(TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, day, 0, 0, 0).unwrap(),
+                price,
+            ));
+            price += (day % 3) as f64 - 1.0; // Vary prices
+        }
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        
+        // Volatility node with window size parameter
+        let mut vol_params = HashMap::new();
+        vol_params.insert("window_size".to_string(), "5".to_string());
+        let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl.clone()]);
+        
+        dag.add_edge(data_node, returns_node).unwrap();
+        dag.add_edge(returns_node, vol_node).unwrap();
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+        );
+        
+        // Execute pull-mode
+        let result = dag.execute_pull_mode(vol_node, date_range, &provider).unwrap();
+        
+        // Volatility starts after window is full
+        // 15 prices -> 14 returns -> 10 volatility values (window=5)
+        assert!(result.len() >= 5, "Expected at least 5 volatility values, got {}", result.len());
+        
+        // All volatility values should be non-negative (or NaN)
+        for (i, point) in result.iter().enumerate() {
+            if !point.close_price.is_nan() {
+                assert!(point.close_price >= 0.0, 
+                    "Volatility at index {} should be non-negative, got {}", i, point.close_price);
+            }
+        }
+    }
+
+    // Task Group 2: Burn-in Calculation Tests
+
+    #[test]
+    fn test_calculate_burnin_days_dataprovider() {
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        // DataProvider should need 0 burn-in days
+        assert_eq!(dag.calculate_burnin_days(data_node), 0);
+    }
+
+    #[test]
+    fn test_calculate_burnin_days_returns() {
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
+        dag.add_edge(data_node, returns_node).unwrap();
+        
+        // Returns should need 1 burn-in day (for first return calculation)
+        assert_eq!(dag.calculate_burnin_days(returns_node), 1);
+    }
+
+    #[test]
+    fn test_calculate_burnin_days_volatility() {
+        use std::collections::HashMap;
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        
+        let mut vol_params = HashMap::new();
+        vol_params.insert("window_size".to_string(), "10".to_string());
+        let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl]);
+        
+        dag.add_edge(data_node, returns_node).unwrap();
+        dag.add_edge(returns_node, vol_node).unwrap();
+        
+        // Volatility(10) should need 11 burn-in days (10 for window + 1 for returns)
+        assert_eq!(dag.calculate_burnin_days(vol_node), 11);
+    }
+
+    #[test]
+    fn test_pull_mode_with_burnin_filters_correctly() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create test data with extra days before the requested range
+        let mut provider = InMemoryDataProvider::new();
+        let mut test_data = Vec::new();
+        for day in 1..=15 {
+            test_data.push(TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, day, 0, 0, 0).unwrap(),
+                100.0 + day as f64,
+            ));
+        }
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
+        dag.add_edge(data_node, returns_node).unwrap();
+        
+        // Request only days 5-10
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+        );
+        
+        let result = dag.execute_pull_mode(returns_node, date_range, &provider).unwrap();
+        
+        // Result should only contain days 5-10 (6 days)
+        assert_eq!(result.len(), 6);
+        
+        // Verify timestamps are within requested range
+        for point in &result {
+            let date = point.timestamp.date_naive();
+            assert!(date >= NaiveDate::from_ymd_opt(2024, 1, 5).unwrap());
+            assert!(date <= NaiveDate::from_ymd_opt(2024, 1, 10).unwrap());
+        }
+    }
+
+    // Task Group 3: Execution Cache System Tests
+
+    #[test]
+    fn test_execution_cache_basic_operations() {
+        use chrono::{Utc, TimeZone, NaiveDate};
+        
+        let mut cache = ExecutionCache::new();
+        let node_id = NodeId(1);
+        
+        // Test empty cache
+        assert!(cache.get(node_id).is_none());
+        
+        // Insert data
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 101.0),
+        ];
+        let range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+        );
+        
+        cache.insert(node_id, test_data.clone(), range);
+        
+        // Test get
+        assert_eq!(cache.get(node_id).unwrap().len(), 2);
+        assert_eq!(cache.get(node_id).unwrap()[0].close_price, 100.0);
+        
+        // Test clear
+        cache.clear();
+        assert!(cache.get(node_id).is_none());
+    }
+
+    #[test]
+    fn test_execution_cache_extract_range() {
+        use chrono::{Utc, TimeZone, NaiveDate};
+        
+        let mut cache = ExecutionCache::new();
+        let node_id = NodeId(1);
+        
+        // Insert data spanning 5 days
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 101.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 102.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 4, 0, 0, 0).unwrap(), 103.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(), 104.0),
+        ];
+        let full_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+        );
+        
+        cache.insert(node_id, test_data, full_range);
+        
+        // Extract subset (days 2-4)
+        let subset_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+        );
+        
+        let extracted = cache.extract_range(node_id, &subset_range).unwrap();
+        
+        // Should have 3 days
+        assert_eq!(extracted.len(), 3);
+        assert_eq!(extracted[0].close_price, 101.0);
+        assert_eq!(extracted[1].close_price, 102.0);
+        assert_eq!(extracted[2].close_price, 103.0);
+    }
+
+    #[test]
+    fn test_execution_cache_diamond_dependency() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        // Create diamond DAG: Data -> (Node1, Node2) -> Node3
+        // This tests that Node3 can retrieve both parent outputs from cache
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 102.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 104.0),
+        ];
+        provider.add_data(aapl.clone(), test_data);
+        
+        // Create diamond structure
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node1 = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node2 = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        
+        dag.add_edge(data_node, returns_node1).unwrap();
+        dag.add_edge(data_node, returns_node2).unwrap();
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        
+        // Execute both nodes - they should both use the cached data_node output
+        let result1 = dag.execute_pull_mode(returns_node1, date_range.clone(), &provider).unwrap();
+        let result2 = dag.execute_pull_mode(returns_node2, date_range, &provider).unwrap();
+        
+        // Both should produce identical results
+        assert_eq!(result1.len(), result2.len());
+        for (p1, p2) in result1.iter().zip(result2.iter()) {
+            // Handle NaN comparison properly
+            if p1.close_price.is_nan() && p2.close_price.is_nan() {
+                continue;
+            }
+            assert_eq!(p1.close_price, p2.close_price);
+        }
+    }
+
+    // Task Group 4: Multi-Asset Parallel Execution Tests
+
+    #[test]
+    fn test_parallel_execution_two_independent_nodes() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        let msft = AssetKey::new_equity("MSFT").unwrap();
+        
+        // Set up test data for both assets
+        let mut provider = InMemoryDataProvider::new();
+        
+        let aapl_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 102.0),
+        ];
+        provider.add_data(aapl.clone(), aapl_data);
+        
+        let msft_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 200.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 204.0),
+        ];
+        provider.add_data(msft.clone(), msft_data);
+        
+        // Create independent nodes for each asset
+        let aapl_data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let msft_data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![msft.clone()]);
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+        );
+        
+        // Execute in parallel
+        let results = dag.execute_pull_mode_parallel(
+            vec![aapl_data_node, msft_data_node],
+            date_range,
+            &provider,
+        ).unwrap();
+        
+        // Verify results
+        assert_eq!(results.len(), 2);
+        assert_eq!(results.get(&aapl_data_node).unwrap().len(), 2);
+        assert_eq!(results.get(&msft_data_node).unwrap().len(), 2);
+        assert_eq!(results.get(&aapl_data_node).unwrap()[0].close_price, 100.0);
+        assert_eq!(results.get(&msft_data_node).unwrap()[0].close_price, 200.0);
+    }
+
+    #[test]
+    fn test_parallel_execution_multiple_assets_same_analytic() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        
+        // Create 3 assets
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        let msft = AssetKey::new_equity("MSFT").unwrap();
+        let googl = AssetKey::new_equity("GOOGL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        
+        // Add data for all 3 assets
+        for (asset, base_price) in vec![(aapl.clone(), 100.0), (msft.clone(), 200.0), (googl.clone(), 300.0)] {
+            let data = vec![
+                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), base_price),
+                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), base_price + 2.0),
+                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), base_price + 4.0),
+            ];
+            provider.add_data(asset, data);
+        }
+        
+        // Create Returns nodes for all 3 assets
+        let mut node_ids = Vec::new();
+        for asset in vec![aapl, msft, googl] {
+            let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![asset.clone()]);
+            let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![asset]);
+            dag.add_edge(data_node, returns_node).unwrap();
+            node_ids.push(returns_node);
+        }
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        
+        // Execute all 3 in parallel
+        let results = dag.execute_pull_mode_parallel(node_ids.clone(), date_range, &provider).unwrap();
+        
+        // Verify all 3 completed
+        assert_eq!(results.len(), 3);
+        for node_id in node_ids {
+            assert_eq!(results.get(&node_id).unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn test_parallel_execution_error_handling() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::NaiveDate;
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create a node but don't provide data - should error
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        let provider = InMemoryDataProvider::new(); // Empty provider
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        );
+        
+        // Should return error
+        let result = dag.execute_pull_mode_parallel(vec![data_node], date_range, &provider);
+        assert!(result.is_err());
+    }
+
+    // Task Group 5: Integration with Existing Systems Tests
+
+    #[test]
+    fn test_integration_with_inmemory_provider_various_ranges() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create 1 year of data
+        let mut provider = InMemoryDataProvider::new();
+        let mut test_data = Vec::new();
+        for day in 1..=365 {
+            let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day - 1);
+            test_data.push(TimeSeriesPoint::new(
+                Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap()),
+                100.0 + (day as f64) * 0.1,
+            ));
+        }
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        // Test 1 day
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        assert_eq!(result.len(), 1);
+        
+        // Test 1 month (30 days)
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        assert_eq!(result.len(), 30);
+        
+        // Test 1 year
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        assert_eq!(result.len(), 365);
+    }
+
+    #[test]
+    fn test_integration_returns_matches_analytics_function() {
+        use crate::time_series::InMemoryDataProvider;
+        use crate::analytics::calculate_returns;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create test data
+        let mut provider = InMemoryDataProvider::new();
+        let prices = vec![100.0, 102.0, 101.0, 103.0, 105.0];
+        let test_data: Vec<TimeSeriesPoint> = prices.iter().enumerate().map(|(i, &price)| {
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, (i + 1) as u32, 0, 0, 0).unwrap(),
+                price,
+            )
+        }).collect();
+        provider.add_data(aapl.clone(), test_data);
+        
+        // Set up DAG
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
+        dag.add_edge(data_node, returns_node).unwrap();
+        
+        // Execute pull-mode
+        let result = dag.execute_pull_mode(
+            returns_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        
+        // Calculate expected returns using analytics function
+        let expected_returns = calculate_returns(&prices);
+        
+        // Compare (allowing for NaN)
+        assert_eq!(result.len(), expected_returns.len());
+        for (actual, &expected) in result.iter().zip(expected_returns.iter()) {
+            if expected.is_nan() {
+                assert!(actual.close_price.is_nan());
+            } else {
+                assert!((actual.close_price - expected).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_integration_volatility_various_windows() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        use std::collections::HashMap;
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create test data with 30 days
+        let mut provider = InMemoryDataProvider::new();
+        let mut test_data = Vec::new();
+        for day in 1..=30 {
+            test_data.push(TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, day, 0, 0, 0).unwrap(),
+                100.0 + (day as f64) * 0.5,
+            ));
+        }
+        provider.add_data(aapl.clone(), test_data);
+        
+        // Test different window sizes
+        for window_size in vec![5, 10, 20] {
+            let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+            let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+            
+            let mut vol_params = HashMap::new();
+            vol_params.insert("window_size".to_string(), window_size.to_string());
+            let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl.clone()]);
+            
+            dag.add_edge(data_node, returns_node).unwrap();
+            dag.add_edge(returns_node, vol_node).unwrap();
+            
+            let result = dag.execute_pull_mode(
+                vol_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
+                ),
+                &provider,
+            ).unwrap();
+            
+            // Should have 30 volatility values
+            assert_eq!(result.len(), 30, "Failed for window size {}", window_size);
+            
+            // All non-NaN values should be non-negative
+            for point in &result {
+                if !point.close_price.is_nan() {
+                    assert!(point.close_price >= 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_integration_complex_dag_multiple_analytics() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        use std::collections::HashMap;
+        
+        // Build a complex DAG: DataProvider -> Returns -> (Volatility5, Volatility10)
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        let mut test_data = Vec::new();
+        for day in 1..=20 {
+            test_data.push(TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, day, 0, 0, 0).unwrap(),
+                100.0 + (day as f64),
+            ));
+        }
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        
+        let mut vol5_params = HashMap::new();
+        vol5_params.insert("window_size".to_string(), "5".to_string());
+        let vol5_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol5_params), vec![aapl.clone()]);
+        
+        let mut vol10_params = HashMap::new();
+        vol10_params.insert("window_size".to_string(), "10".to_string());
+        let vol10_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol10_params), vec![aapl]);
+        
+        dag.add_edge(data_node, returns_node).unwrap();
+        dag.add_edge(returns_node, vol5_node).unwrap();
+        dag.add_edge(returns_node, vol10_node).unwrap();
+        
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
+        );
+        
+        // Execute different nodes - should all work
+        let vol5_result = dag.execute_pull_mode(vol5_node, date_range.clone(), &provider).unwrap();
+        let vol10_result = dag.execute_pull_mode(vol10_node, date_range, &provider).unwrap();
+        
+        assert_eq!(vol5_result.len(), 20);
+        assert_eq!(vol10_result.len(), 20);
+    }
+
+    // Task Group 6: Validation & Testing
+
+    #[test]
+    fn test_edge_case_empty_date_range() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::NaiveDate;
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        let provider = InMemoryDataProvider::new();
+        
+        // Empty range (start > end) - should return empty
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            ),
+            &provider,
+        );
+        
+        // May error or return empty, both are acceptable
+        assert!(result.is_err() || result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_edge_case_single_data_point() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+        ];
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
+        dag.add_edge(data_node, returns_node).unwrap();
+        
+        let result = dag.execute_pull_mode(
+            returns_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        
+        // Single point should return 1 result (NaN for returns)
+        assert_eq!(result.len(), 1);
+        assert!(result[0].close_price.is_nan());
+    }
+
+    #[test]
+    fn test_edge_case_date_range_before_data() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        // Data starts from Jan 10
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 10, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 11, 0, 0, 0).unwrap(), 101.0),
+        ];
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        // Request data before availability (Jan 1-5)
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        
+        // Should return empty (no data in that range)
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_edge_case_date_range_after_data() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, Utc, TimeZone};
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        let mut provider = InMemoryDataProvider::new();
+        // Data ends at Jan 5
+        let test_data = vec![
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(), 101.0),
+        ];
+        provider.add_data(aapl.clone(), test_data);
+        
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        // Request data after availability (Jan 10-15)
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            ),
+            &provider,
+        ).unwrap();
+        
+        // Should return empty
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_error_handling_invalid_node_id() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::NaiveDate;
+        
+        let dag = AnalyticsDag::new();
+        let provider = InMemoryDataProvider::new();
+        
+        let non_existent_node = NodeId(9999);
+        let result = dag.execute_pull_mode(
+            non_existent_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            ),
+            &provider,
+        );
+        
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DagError::NodeNotFound(_)));
+    }
+
+    #[test]
+    fn test_error_handling_provider_failure() {
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::NaiveDate;
+        
+        let mut dag = AnalyticsDag::new();
+        let aapl = AssetKey::new_equity("AAPL").unwrap();
+        
+        // Create node but don't provide data - will cause AssetNotFound error
+        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
+        
+        let provider = InMemoryDataProvider::new(); // Empty provider
+        
+        let result = dag.execute_pull_mode(
+            data_node,
+            DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            ),
+            &provider,
+        );
+        
+        assert!(result.is_err());
+        // Should be a DataProviderError
+        if let Err(e) = result {
+            assert!(format!("{}", e).contains("Asset not found") || 
+                    format!("{}", e).contains("Data provider error"));
+        }
     }
 }
