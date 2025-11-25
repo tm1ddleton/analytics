@@ -45,27 +45,27 @@ Total Tasks: 4 task groups
 #### Task Group 2: Equity and Futures Asset Types
 **Dependencies:** Task Group 1
 
-- [ ] 2.0 Complete equity and futures asset implementations
-  - [ ] 2.1 Write 2-8 focused tests for equity and futures structs
+- [x] 2.0 Complete equity and futures asset implementations
+  - [x] 2.1 Write 2-8 focused tests for equity and futures structs
     - Test equity creation with metadata
     - Test futures creation with series and expiry
     - Test immutability (no mutation after creation)
     - Test asset type discrimination
     - Test metadata field access
-  - [ ] 2.2 Create Equity struct with metadata fields
+  - [x] 2.2 Create Equity struct with metadata fields
     - Fields: key, name, exchange, currency, sector
     - Include corporate action data structure (splits, dividends)
     - Implement constructor/factory methods
     - Ensure struct is immutable (no mutable fields)
-  - [ ] 2.3 Create Future struct with expiry details
+  - [x] 2.3 Create Future struct with expiry details
     - Fields: key (series + expiry), series (underlying), expiry_date, contract_month
     - Include expiry calendar reference/notion
     - Implement constructor/factory methods
     - Ensure struct is immutable
-  - [ ] 2.4 Create common metadata struct for shared fields
+  - [x] 2.4 Create common metadata struct for shared fields
     - Extract common fields (name, exchange, currency) if applicable
     - Use composition in Equity and Future structs
-  - [ ] 2.5 Ensure equity and futures tests pass
+  - [x] 2.5 Ensure equity and futures tests pass
     - Run ONLY the 2-8 tests written in 2.1
     - Verify struct creation and field access work
     - Do NOT run the entire test suite at this stage

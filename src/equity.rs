@@ -1,0 +1,253 @@
+use crate::asset::{Asset, AssetType};
+use crate::asset_key::AssetKey;
+use chrono::NaiveDate;
+use serde::{Deserialize, Serialize};
+
+/// Common metadata fields shared across asset types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetMetadata {
+    /// Asset name (e.g., "Apple Inc.")
+    pub name: String,
+    /// Exchange where the asset is traded (e.g., "NASDAQ", "NYSE")
+    pub exchange: String,
+    /// Currency code (e.g., "USD", "EUR")
+    pub currency: String,
+}
+
+impl AssetMetadata {
+    /// Creates a new AssetMetadata instance.
+    pub fn new(name: impl Into<String>, exchange: impl Into<String>, currency: impl Into<String>) -> Self {
+        AssetMetadata {
+            name: name.into(),
+            exchange: exchange.into(),
+            currency: currency.into(),
+        }
+    }
+}
+
+/// Corporate action types for equities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CorporateAction {
+    /// Stock split (e.g., 2-for-1 split)
+    Split {
+        ratio: f64,
+        effective_date: NaiveDate,
+    },
+    /// Dividend payment
+    Dividend {
+        amount: f64,
+        ex_date: NaiveDate,
+        payment_date: NaiveDate,
+    },
+}
+
+/// Equity asset representing a stock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Equity {
+    /// Unique asset key (ticker symbol)
+    key: AssetKey,
+    /// Common metadata (name, exchange, currency)
+    metadata: AssetMetadata,
+    /// Sector classification (e.g., "Technology", "Healthcare")
+    sector: String,
+    /// Corporate actions (splits, dividends, etc.)
+    corporate_actions: Vec<CorporateAction>,
+}
+
+impl Equity {
+    /// Creates a new Equity asset.
+    /// 
+    /// # Arguments
+    /// * `ticker` - The ticker symbol (e.g., "AAPL")
+    /// * `name` - The company name
+    /// * `exchange` - The exchange where it's traded
+    /// * `currency` - The currency code
+    /// * `sector` - The sector classification
+    /// 
+    /// # Returns
+    /// Returns `Ok(Equity)` if the ticker is valid, or `Err` if invalid.
+    pub fn new(
+        ticker: impl Into<String>,
+        name: impl Into<String>,
+        exchange: impl Into<String>,
+        currency: impl Into<String>,
+        sector: impl Into<String>,
+    ) -> Result<Self, crate::asset_key::AssetKeyError> {
+        let key = AssetKey::new_equity(ticker)?;
+        Ok(Equity {
+            key,
+            metadata: AssetMetadata::new(name, exchange, currency),
+            sector: sector.into(),
+            corporate_actions: Vec::new(),
+        })
+    }
+
+    /// Creates a new Equity asset with corporate actions.
+    /// 
+    /// # Arguments
+    /// * `ticker` - The ticker symbol
+    /// * `name` - The company name
+    /// * `exchange` - The exchange where it's traded
+    /// * `currency` - The currency code
+    /// * `sector` - The sector classification
+    /// * `corporate_actions` - Vector of corporate actions
+    /// 
+    /// # Returns
+    /// Returns `Ok(Equity)` if the ticker is valid, or `Err` if invalid.
+    pub fn with_corporate_actions(
+        ticker: impl Into<String>,
+        name: impl Into<String>,
+        exchange: impl Into<String>,
+        currency: impl Into<String>,
+        sector: impl Into<String>,
+        corporate_actions: Vec<CorporateAction>,
+    ) -> Result<Self, crate::asset_key::AssetKeyError> {
+        let key = AssetKey::new_equity(ticker)?;
+        Ok(Equity {
+            key,
+            metadata: AssetMetadata::new(name, exchange, currency),
+            sector: sector.into(),
+            corporate_actions,
+        })
+    }
+
+    /// Returns the asset name.
+    pub fn name(&self) -> &str {
+        &self.metadata.name
+    }
+
+    /// Returns the exchange.
+    pub fn exchange(&self) -> &str {
+        &self.metadata.exchange
+    }
+
+    /// Returns the currency.
+    pub fn currency(&self) -> &str {
+        &self.metadata.currency
+    }
+
+    /// Returns the sector.
+    pub fn sector(&self) -> &str {
+        &self.sector
+    }
+
+    /// Returns a reference to the corporate actions.
+    pub fn corporate_actions(&self) -> &[CorporateAction] {
+        &self.corporate_actions
+    }
+}
+
+impl Asset for Equity {
+    fn key(&self) -> &AssetKey {
+        &self.key
+    }
+
+    fn asset_type(&self) -> AssetType {
+        AssetType::Equity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn test_equity_creation_with_metadata() {
+        let equity = Equity::new(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        assert_eq!(equity.name(), "Apple Inc.");
+        assert_eq!(equity.exchange(), "NASDAQ");
+        assert_eq!(equity.currency(), "USD");
+        assert_eq!(equity.sector(), "Technology");
+        assert!(matches!(equity.key(), AssetKey::Equity(_)));
+    }
+
+    #[test]
+    fn test_equity_creation_with_corporate_actions() {
+        let split = CorporateAction::Split {
+            ratio: 2.0,
+            effective_date: NaiveDate::from_ymd_opt(2020, 8, 31).unwrap(),
+        };
+        let dividend = CorporateAction::Dividend {
+            amount: 0.82,
+            ex_date: NaiveDate::from_ymd_opt(2023, 11, 10).unwrap(),
+            payment_date: NaiveDate::from_ymd_opt(2023, 11, 16).unwrap(),
+        };
+
+        let equity = Equity::with_corporate_actions(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+            vec![split.clone(), dividend.clone()],
+        ).unwrap();
+
+        assert_eq!(equity.corporate_actions().len(), 2);
+        assert_eq!(equity.corporate_actions()[0], split);
+        assert_eq!(equity.corporate_actions()[1], dividend);
+    }
+
+    #[test]
+    fn test_equity_immutability() {
+        let equity1 = Equity::new(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        let equity2 = equity1.clone();
+        assert_eq!(equity1, equity2);
+    }
+
+    #[test]
+    fn test_equity_asset_type_discrimination() {
+        let equity = Equity::new(
+            "MSFT",
+            "Microsoft Corporation",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        assert_eq!(equity.asset_type(), AssetType::Equity);
+    }
+
+    #[test]
+    fn test_equity_metadata_field_access() {
+        let equity = Equity::new(
+            "GOOGL",
+            "Alphabet Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        assert_eq!(equity.name(), "Alphabet Inc.");
+        assert_eq!(equity.exchange(), "NASDAQ");
+        assert_eq!(equity.currency(), "USD");
+        assert_eq!(equity.sector(), "Technology");
+    }
+
+    #[test]
+    fn test_equity_invalid_ticker() {
+        let result = Equity::new(
+            "",
+            "Invalid Corp",
+            "NYSE",
+            "USD",
+            "Finance",
+        );
+        assert!(result.is_err());
+    }
+}
+
