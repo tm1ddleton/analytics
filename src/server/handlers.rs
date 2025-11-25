@@ -15,7 +15,7 @@ use std::sync::Arc;
 use super::error::ApiError;
 use super::state::{AppState, AnalyticConfig, ReplaySession, SessionStatus};
 use crate::asset_key::AssetKey;
-use crate::dag::{AnalyticsDag, NodeId, NodeParams};
+use crate::dag::{AnalyticsDag, NodeId, NodeParams, NodeOutput};
 use crate::time_series::DateRange;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -221,8 +221,9 @@ fn build_analytics_dag(
 ) -> Result<(AnalyticsDag, NodeId), ApiError> {
     let mut dag = AnalyticsDag::new();
 
+    // Use lowercase node types for push-mode compatibility
     let data_node = dag.add_node(
-        "DataProvider".to_string(),
+        "data_provider".to_string(),
         NodeParams::None,
         vec![asset.clone()],
     );
@@ -230,7 +231,7 @@ fn build_analytics_dag(
     match analytic_type {
         "returns" => {
             let returns_node = dag.add_node(
-                "Returns".to_string(),
+                "returns".to_string(),
                 NodeParams::None,
                 vec![asset.clone()],
             );
@@ -250,9 +251,9 @@ fn build_analytics_dag(
                 ));
             }
 
-            // Build: DataProvider -> Returns -> Volatility
+            // Build: data_provider -> returns -> volatility
             let returns_node = dag.add_node(
-                "Returns".to_string(),
+                "returns".to_string(),
                 NodeParams::None,
                 vec![asset.clone()],
             );
@@ -261,7 +262,7 @@ fn build_analytics_dag(
             vol_params_map.insert("window_size".to_string(), window.to_string());
             
             let vol_node = dag.add_node(
-                "Volatility".to_string(),
+                "volatility".to_string(),
                 NodeParams::Map(vol_params_map),
                 vec![asset.clone()],
             );
@@ -661,12 +662,9 @@ pub async fn stop_replay_session(
     }))
 }
 
-// Task Group 7: Server-Sent Events Streaming (Simplified)
+// Task Group 7: Server-Sent Events Streaming
 
 /// GET /stream/{session_id} - SSE stream for replay updates
-/// 
-/// This is a simplified implementation that establishes the SSE connection.
-/// Full replay integration would happen in Task Group 8.
 pub async fn handle_stream(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -674,21 +672,145 @@ pub async fn handle_stream(
     let session_id = Uuid::parse_str(&session_id)
         .map_err(|_| ApiError::InvalidParameter("Invalid session ID".to_string()))?;
 
-    // Verify session exists
+    // Get session info
     let sessions = state.sessions.read().await;
-    if !sessions.contains_key(&session_id) {
-        return Err(ApiError::SessionNotFound(session_id));
-    }
+    let session = sessions.get(&session_id)
+        .ok_or_else(|| ApiError::SessionNotFound(session_id))?;
+    
+    let assets = session.assets.clone();
+    let analytics = session.analytics.clone();
+    let start_date = session.start_date;
+    let end_date = session.end_date;
     drop(sessions);
 
-    // Create a simple stream that sends a test message
-    // In full implementation, this would receive events from the replay engine
-    let stream = futures::stream::once(async move {
-        Ok(Event::default()
-            .event("connected")
-            .data(format!("{{\"session_id\":\"{}\",\"message\":\"Connected to replay stream\"}}", session_id)))
+    // Create channel for sending events
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    
+    // Send initial connected event
+    let _ = tx.send(Ok(Event::default()
+        .event("connected")
+        .data(format!("{{\"session_id\":\"{}\"}}", session_id))));
+
+    // Clone state for background task
+    let state_clone = state.clone();
+    
+    // Spawn task to run real push-mode replay
+    tokio::spawn(async move {
+        use crate::push_mode::PushModeEngine;
+        
+        // Process each asset separately (for simplicity in the demo)
+        for asset_key in &assets {
+            for analytic in &analytics {
+                tracing::info!("Replay: Setting up push-mode for {} {}", 
+                    asset_key.to_string(), analytic.analytic_type);
+                
+                // Build parameters
+                let mut params = HashMap::new();
+                for (key, value) in &analytic.parameters {
+                    params.insert(key.clone(), value.clone());
+                }
+                
+                // Build DAG for this asset and analytic
+                let dag_result = build_analytics_dag(asset_key, &analytic.analytic_type, &params);
+                if let Err(e) = dag_result {
+                    tracing::error!("Replay: Failed to build DAG: {}", e);
+                    continue;
+                }
+                
+                let (dag, target_node) = dag_result.unwrap();
+                
+                // Create push-mode engine
+                let mut push_engine = PushModeEngine::new(dag);
+                
+                // Initialize with historical data (for burn-in)
+                let provider = state_clone.data_provider.lock().await;
+                let init_end = start_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+                
+                if let Err(e) = push_engine.initialize(&*provider, init_end, 50) {
+                    tracing::error!("Replay: Failed to initialize push engine: {}", e);
+                    drop(provider);
+                    continue;
+                }
+                
+                // Load all data for this asset in the date range
+                use crate::time_series::DataProvider;
+                let date_range = DateRange::new(start_date, end_date);
+                let all_data = match (*provider).get_time_series(asset_key, &date_range) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::error!("Replay: Failed to load data: {}", e);
+                        drop(provider);
+                        continue;
+                    }
+                };
+                drop(provider);
+                
+                tracing::info!("Replay: Loaded {} data points, will stream incrementally", all_data.len());
+                
+                // Register callback to capture results
+                let asset_str = asset_key.to_string();
+                let analytic_str = analytic.analytic_type.clone();
+                let tx_clone = tx.clone();
+                
+                if let Err(e) = push_engine.register_callback(target_node, Box::new(move |output| {
+                    // Extract the last value from the output
+                    if let NodeOutput::Single(ref data) = output {
+                        if let Some(last_point) = data.last() {
+                            if !last_point.close_price.is_nan() {
+                                tracing::debug!("Push-mode callback: {} {} at {} = {}", 
+                                    asset_str, analytic_str, last_point.timestamp, last_point.close_price);
+                                let _ = tx_clone.send(Ok(Event::default()
+                                    .event("update")
+                                    .data(format!("{{\"asset\":\"{}\",\"analytic\":\"{}\",\"timestamp\":\"{}\",\"value\":{}}}",
+                                        asset_str, 
+                                        analytic_str,
+                                        last_point.timestamp.to_rfc3339(), 
+                                        last_point.close_price))));
+                            }
+                        }
+                    }
+                })) {
+                    tracing::error!("Replay: Failed to register callback: {}", e);
+                    continue;
+                }
+                
+                // Now feed data incrementally
+                let num_points = all_data.len();
+                for (i, point) in all_data.iter().enumerate() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    
+                    let progress = (i as f64) / (num_points as f64);
+                    
+                    // Send progress update
+                    let _ = tx.send(Ok(Event::default()
+                        .event("progress")
+                        .data(format!("{{\"current_date\":\"{}\",\"progress\":{}}}", 
+                            point.timestamp.format("%Y-%m-%d"), progress))));
+                    
+                    // Push data point - this triggers incremental computation
+                    if let Err(e) = push_engine.push_data(asset_key.clone(), point.timestamp, point.close_price) {
+                        tracing::error!("Replay: Failed to push data: {}", e);
+                    }
+                }
+                
+                tracing::info!("Replay: Completed push-mode replay for {} {}", asset_key.to_string(), analytic.analytic_type);
+            }
+        }
+        
+        // Send complete event
+        let _ = tx.send(Ok(Event::default()
+            .event("complete")
+            .data("{}")));
     });
+
+    // Create stream from receiver
+    let stream = async_stream::stream! {
+        while let Some(event) = rx.recv().await {
+            yield event;
+        }
+    };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
+
 

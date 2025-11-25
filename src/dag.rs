@@ -1050,8 +1050,9 @@ impl AnalyticsDag {
         date_range: &DateRange,
         provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        // Handle DataProvider nodes
-        if node.node_type == "DataProvider" || node.node_type.contains("DataProvider") {
+        // Handle DataProvider nodes (both capitalized and lowercase for compatibility)
+        if node.node_type == "DataProvider" || node.node_type == "data_provider" 
+            || node.node_type.contains("DataProvider") || node.node_type.contains("data_provider") {
             if let Some(asset) = node.assets.first() {
                 let data = provider.get_time_series(asset, date_range)?;
                 return Ok(data);
@@ -1063,7 +1064,7 @@ impl AnalyticsDag {
         }
         
         match node.node_type.as_str() {
-            "Returns" => {
+            "Returns" | "returns" => {
                 // Calculate returns from parent data (prices)
                 if parent_outputs.is_empty() {
                     return Err(DagError::ExecutionError(
@@ -1093,7 +1094,7 @@ impl AnalyticsDag {
                 
                 Ok(result)
             }
-            "Volatility" => {
+            "Volatility" | "volatility" => {
                 // Calculate volatility from parent data (returns)
                 if parent_outputs.is_empty() {
                     return Err(DagError::ExecutionError(
