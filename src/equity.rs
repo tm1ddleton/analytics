@@ -27,7 +27,7 @@ impl AssetMetadata {
 }
 
 /// Corporate action types for equities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CorporateAction {
     /// Stock split (e.g., 2-for-1 split)
     Split {
@@ -43,7 +43,7 @@ pub enum CorporateAction {
 }
 
 /// Equity asset representing a stock.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Equity {
     /// Unique asset key (ticker symbol)
     key: AssetKey,

@@ -79,10 +79,11 @@ impl Future {
         calendar_id: impl Into<String>,
         rollover_days: u32,
     ) -> Result<Self, crate::asset_key::AssetKeyError> {
-        let key = AssetKey::new_future(series.clone(), expiry_date)?;
+        let series_str: String = series.into();
+        let key = AssetKey::new_future(series_str.clone(), expiry_date)?;
         Ok(Future {
             key,
-            series: series.into(),
+            series: series_str,
             expiry_date,
             contract_month: contract_month.into(),
             metadata: crate::equity::AssetMetadata::new(name, exchange, currency),
