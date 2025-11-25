@@ -542,6 +542,14 @@ impl AnalyticsDag {
             Vec::new()
         }
     }
+    
+    /// Gets all node IDs in the DAG
+    /// 
+    /// # Returns
+    /// Vector of all NodeId values
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.node_id_to_index.keys().copied().collect()
+    }
 
     /// Gets child nodes of a given node
     pub fn get_children(&self, node_id: NodeId) -> Vec<NodeId> {

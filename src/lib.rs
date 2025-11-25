@@ -7,6 +7,7 @@ pub mod sqlite_provider;
 pub mod yahoo_finance;
 pub mod dag;
 pub mod analytics;
+pub mod push_mode;
 
 #[cfg(test)]
 mod integration_tests;
@@ -28,4 +29,5 @@ pub use analytics::{
     VolatilityQueryBuilder,
     apply_output_mode,
 };
+pub use push_mode::{CircularBuffer, PushModeEngine, PushError, InitError, NodeState, NodePushState};
 
