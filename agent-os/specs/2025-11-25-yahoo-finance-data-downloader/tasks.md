@@ -50,26 +50,26 @@ Total Tasks: 6 task groups
 #### Task Group 2: Yahoo Finance Data Parsing and Conversion
 **Dependencies:** Task Group 1
 
-- [ ] 2.0 Complete Yahoo Finance data parsing and conversion
-  - [ ] 2.1 Write 2-8 focused tests for data parsing
+- [x] 2.0 Complete Yahoo Finance data parsing and conversion
+  - [x] 2.1 Write 2-8 focused tests for data parsing
     - Test parsing OHLCV data from Yahoo Finance response
     - Test extracting close prices only
     - Test timestamp conversion to DateTime<Utc>
     - Test handling missing or invalid data
-  - [ ] 2.2 Implement response data parsing
+  - [x] 2.2 Implement response data parsing
     - Parse Yahoo Finance API response format (CSV, JSON, or other format)
     - Extract OHLCV data points
     - Handle different response formats if Yahoo Finance uses multiple
-  - [ ] 2.3 Implement data conversion to TimeSeriesPoint
+  - [x] 2.3 Implement data conversion to TimeSeriesPoint
     - Extract close prices from OHLCV data
     - Drop Open, High, Low, Volume fields
     - Convert timestamps from Yahoo Finance format to DateTime<Utc>
     - Create TimeSeriesPoint structs for each data point
-  - [ ] 2.4 Implement date range filtering
+  - [x] 2.4 Implement date range filtering
     - Filter downloaded data to match requested date range
     - Handle timezone conversions correctly
     - Ensure inclusive date boundaries
-  - [ ] 2.5 Ensure data parsing and conversion tests pass
+  - [x] 2.5 Ensure data parsing and conversion tests pass
     - Run ONLY the 2-8 tests written in 2.1
     - Verify data is correctly parsed and converted
     - Verify date filtering works correctly

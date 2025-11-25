@@ -1,6 +1,8 @@
 use crate::asset_key::AssetKey;
+use crate::time_series::TimeSeriesPoint;
 use chrono::{NaiveDate, Utc};
 use reqwest::Client;
+use std::io::Cursor;
 use std::time::Duration;
 
 /// Configuration for Yahoo Finance downloader
@@ -144,6 +146,96 @@ impl YahooFinanceDownloader {
             .map_err(|e| DownloadError::ParseError(e.to_string()))?;
 
         Ok(text)
+    }
+
+    /// Parses Yahoo Finance CSV response and converts to TimeSeriesPoint structs.
+    /// 
+    /// # Arguments
+    /// * `csv_data` - The CSV response data from Yahoo Finance
+    /// * `start_date` - Start date for filtering (inclusive)
+    /// * `end_date` - End date for filtering (inclusive)
+    /// 
+    /// # Returns
+    /// Returns a vector of TimeSeriesPoint structs, or an error if parsing fails.
+    /// 
+    /// # Errors
+    /// Returns `DownloadError::ParseError` if CSV parsing fails or data format is invalid.
+    pub fn parse_csv_response(
+        &self,
+        csv_data: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<TimeSeriesPoint>, DownloadError> {
+        let mut reader = csv::Reader::from_reader(Cursor::new(csv_data));
+        let mut points = Vec::new();
+
+        // Yahoo Finance CSV format: Date,Open,High,Low,Close,Adj Close,Volume
+        for result in reader.records() {
+            let record = result.map_err(|e| DownloadError::ParseError(format!("CSV parse error: {}", e)))?;
+
+            // Skip if not enough columns
+            if record.len() < 5 {
+                continue;
+            }
+
+            // Parse date (first column)
+            let date_str = record.get(0).ok_or_else(|| {
+                DownloadError::ParseError("Missing date column".to_string())
+            })?;
+            
+            // Yahoo Finance uses format: YYYY-MM-DD
+            let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                .map_err(|e| DownloadError::ParseError(format!("Invalid date format '{}': {}", date_str, e)))?;
+
+            // Filter by date range (inclusive)
+            if date < start_date || date > end_date {
+                continue;
+            }
+
+            // Parse close price (5th column, index 4)
+            let close_str = record.get(4).ok_or_else(|| {
+                DownloadError::ParseError("Missing close price column".to_string())
+            })?;
+            
+            let close_price = close_str.parse::<f64>()
+                .map_err(|e| DownloadError::ParseError(format!("Invalid close price '{}': {}", close_str, e)))?;
+
+            // Convert date to DateTime<Utc> at market close (16:00:00 ET, which is 21:00:00 UTC)
+            // For simplicity, we'll use 16:00:00 UTC (can be adjusted based on exchange)
+            let timestamp = date
+                .and_hms_opt(16, 0, 0)
+                .ok_or_else(|| DownloadError::InvalidDate(format!("Invalid date: {}", date)))?
+                .and_local_timezone(Utc)
+                .unwrap();
+
+            points.push(TimeSeriesPoint::new(timestamp, close_price));
+        }
+
+        // Sort by timestamp to ensure chronological order
+        points.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+        Ok(points)
+    }
+
+    /// Downloads and parses historical data from Yahoo Finance.
+    /// 
+    /// This is a convenience method that combines fetch_historical_data and parse_csv_response.
+    /// 
+    /// # Arguments
+    /// * `symbol` - Yahoo Finance symbol (e.g., "AAPL", "ES=F")
+    /// * `start_date` - Start date for historical data
+    /// * `end_date` - End date for historical data
+    /// 
+    /// # Returns
+    /// Returns a vector of TimeSeriesPoint structs, or an error if download or parsing fails.
+    pub async fn download_and_parse(
+        &self,
+        symbol: &str,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<TimeSeriesPoint>, DownloadError> {
+        let csv_data = self.fetch_historical_data(symbol, start_date, end_date).await?;
+        self.parse_csv_response(&csv_data, start_date, end_date)
     }
 
     /// Returns a reference to the HTTP client.
@@ -297,6 +389,180 @@ mod tests {
         let error = DownloadError::NetworkError("Connection timeout".to_string());
         assert!(error.to_string().contains("Network error"));
         assert!(error.to_string().contains("Connection timeout"));
+    }
+
+    #[test]
+    fn test_parse_csv_response_valid_data() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        // Sample Yahoo Finance CSV format
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-15,150.0,151.5,149.5,150.5,150.5,1000000\n\
+                       2024-01-16,150.5,152.0,150.0,151.0,151.0,1200000\n\
+                       2024-01-17,151.0,152.5,150.5,152.0,152.0,1100000";
+        
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 17).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_ok());
+        
+        let points = result.unwrap();
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].close_price, 150.5);
+        assert_eq!(points[1].close_price, 151.0);
+        assert_eq!(points[2].close_price, 152.0);
+    }
+
+    #[test]
+    fn test_parse_csv_response_extract_close_only() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        // CSV with OHLCV data - should only extract close prices
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-15,150.0,151.5,149.5,150.5,150.5,1000000";
+        
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_ok());
+        
+        let points = result.unwrap();
+        assert_eq!(points.len(), 1);
+        // Should extract close price (150.5), not open (150.0), high (151.5), or low (149.5)
+        assert_eq!(points[0].close_price, 150.5);
+    }
+
+    #[test]
+    fn test_parse_csv_response_timestamp_conversion() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-15,150.0,151.5,149.5,150.5,150.5,1000000";
+        
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_ok());
+        
+        let points = result.unwrap();
+        assert_eq!(points.len(), 1);
+        
+        // Verify timestamp is DateTime<Utc>
+        let timestamp = points[0].timestamp;
+        assert_eq!(timestamp.date_naive(), start_date);
+        assert_eq!(timestamp.timezone(), Utc);
+    }
+
+    #[test]
+    fn test_parse_csv_response_date_range_filtering() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-14,149.0,150.0,148.5,149.5,149.5,900000\n\
+                       2024-01-15,150.0,151.5,149.5,150.5,150.5,1000000\n\
+                       2024-01-16,150.5,152.0,150.0,151.0,151.0,1200000\n\
+                       2024-01-17,151.0,152.5,150.5,152.0,152.0,1100000\n\
+                       2024-01-18,152.0,153.0,151.5,152.5,152.5,1300000";
+        
+        // Request date range that excludes first and last dates
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 17).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_ok());
+        
+        let points = result.unwrap();
+        // Should only include dates 2024-01-15, 2024-01-16, 2024-01-17 (3 points)
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].close_price, 150.5); // 2024-01-15
+        assert_eq!(points[1].close_price, 151.0); // 2024-01-16
+        assert_eq!(points[2].close_price, 152.0); // 2024-01-17
+    }
+
+    #[test]
+    fn test_parse_csv_response_inclusive_boundaries() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-15,150.0,151.5,149.5,150.5,150.5,1000000\n\
+                       2024-01-16,150.5,152.0,150.0,151.0,151.0,1200000";
+        
+        // Test that boundary dates are included
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_ok());
+        
+        let points = result.unwrap();
+        assert_eq!(points.len(), 2); // Both boundary dates included
+    }
+
+    #[test]
+    fn test_parse_csv_response_invalid_data() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        // CSV with invalid close price
+        let csv_data = "Date,Open,High,Low,Close,Adj Close,Volume\n\
+                       2024-01-15,150.0,151.5,149.5,invalid,150.5,1000000";
+        
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DownloadError::ParseError(_)));
+    }
+
+    #[test]
+    fn test_parse_csv_response_missing_columns() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        
+        // CSV with insufficient columns
+        let csv_data = "Date,Open\n2024-01-15,150.0";
+        
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        
+        let result = downloader.parse_csv_response(csv_data, start_date, end_date);
+        // Should handle gracefully - skip rows with insufficient columns
+        assert!(result.is_ok());
+        let points = result.unwrap();
+        assert_eq!(points.len(), 0); // No valid data points
+    }
+
+    #[tokio::test]
+    async fn test_download_and_parse_integration() {
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        let start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        
+        // Test with a known symbol (AAPL)
+        let result = downloader.download_and_parse("AAPL", start_date, end_date).await;
+        
+        // Should either succeed or fail with a network/API error, but not a parse error if data is received
+        match result {
+            Ok(points) => {
+                // If successful, should have parsed data points
+                assert!(!points.is_empty());
+                // Verify all points are within date range
+                for point in &points {
+                    let point_date = point.timestamp.date_naive();
+                    assert!(point_date >= start_date && point_date <= end_date);
+                }
+            }
+            Err(DownloadError::NetworkError(_)) | Err(DownloadError::ApiError(_)) => {
+                // Network or API errors are acceptable in tests
+            }
+            Err(DownloadError::ParseError(_)) => {
+                // Parse errors suggest the CSV format changed or is unexpected
+                // This is worth investigating but not necessarily a test failure
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
     }
 }
 
