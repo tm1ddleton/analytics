@@ -1,5 +1,6 @@
 use crate::asset_key::AssetKey;
-use crate::time_series::TimeSeriesPoint;
+use crate::sqlite_provider::SqliteDataProvider;
+use crate::time_series::{DataProvider, DateRange, TimeSeriesPoint};
 use chrono::{NaiveDate, Utc};
 use reqwest::Client;
 use std::io::Cursor;
@@ -236,6 +237,85 @@ impl YahooFinanceDownloader {
     ) -> Result<Vec<TimeSeriesPoint>, DownloadError> {
         let csv_data = self.fetch_historical_data(symbol, start_date, end_date).await?;
         self.parse_csv_response(&csv_data, start_date, end_date)
+    }
+
+    /// Downloads historical data from Yahoo Finance and stores it in SQLite.
+    /// 
+    /// This method checks for existing data and only downloads missing dates (incremental behavior).
+    /// 
+    /// # Arguments
+    /// * `provider` - Mutable reference to SqliteDataProvider for storing data
+    /// * `asset_key` - The asset key to download data for
+    /// * `date_range` - The date range to download
+    /// 
+    /// # Returns
+    /// Returns the number of data points downloaded and stored, or an error if download/storage fails.
+    /// 
+    /// # Errors
+    /// Returns `DownloadError` if the download or storage operation fails.
+    pub async fn download_to_sqlite(
+        &self,
+        provider: &mut SqliteDataProvider,
+        asset_key: &AssetKey,
+        date_range: &DateRange,
+    ) -> Result<usize, DownloadError> {
+        // Check for existing data in SQLite
+        // If asset not found, treat as empty (no existing data)
+        let existing_data = match provider.get_time_series(asset_key, date_range) {
+            Ok(data) => data,
+            Err(crate::time_series::DataProviderError::AssetNotFound) => {
+                // Asset doesn't exist yet - no existing data
+                Vec::new()
+            }
+            Err(e) => {
+                return Err(DownloadError::ParseError(format!("Failed to query existing data: {}", e)));
+            }
+        };
+
+        // Extract existing dates
+        let existing_dates: std::collections::HashSet<NaiveDate> = existing_data
+            .iter()
+            .map(|point| point.timestamp.date_naive())
+            .collect();
+
+        // Determine which dates need to be downloaded
+        let mut dates_to_download = Vec::new();
+        let mut current_date = date_range.start;
+        while current_date <= date_range.end {
+            if !existing_dates.contains(&current_date) {
+                dates_to_download.push(current_date);
+            }
+            current_date = current_date.succ_opt().unwrap_or(current_date);
+        }
+
+        // If all dates already exist, return early
+        if dates_to_download.is_empty() {
+            return Ok(0);
+        }
+
+        // Download data for the date range (Yahoo Finance API downloads the full range)
+        let symbol = self.asset_key_to_symbol(asset_key);
+        let points = self
+            .download_and_parse(&symbol, date_range.start, date_range.end)
+            .await?;
+
+        // Filter out points that already exist in database
+        let new_points: Vec<TimeSeriesPoint> = points
+            .into_iter()
+            .filter(|point| {
+                let point_date = point.timestamp.date_naive();
+                !existing_dates.contains(&point_date)
+            })
+            .collect();
+
+        // Store new points using batch insert
+        if !new_points.is_empty() {
+            provider
+                .insert_time_series_batch(asset_key, &new_points)
+                .map_err(|e| DownloadError::ParseError(format!("Failed to store data: {}", e)))?;
+        }
+
+        Ok(new_points.len())
     }
 
     /// Returns a reference to the HTTP client.
@@ -560,6 +640,163 @@ mod tests {
             Err(DownloadError::ParseError(_)) => {
                 // Parse errors suggest the CSV format changed or is unexpected
                 // This is worth investigating but not necessarily a test failure
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_to_sqlite_single_asset() {
+        use crate::time_series::DateRange;
+        
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        let mut provider = SqliteDataProvider::new_in_memory().unwrap();
+        let asset_key = AssetKey::new_equity("AAPL").unwrap();
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+        );
+
+        // Download and store data
+        let result = downloader.download_to_sqlite(&mut provider, &asset_key, &date_range).await;
+        
+        match result {
+            Ok(_count) => {
+                // If successful, verify data was stored
+                if _count > 0 {
+                    let stored_data = provider.get_time_series(&asset_key, &date_range).unwrap();
+                    assert!(!stored_data.is_empty());
+                    assert_eq!(stored_data.len(), _count);
+                }
+            }
+            Err(DownloadError::NetworkError(_)) | Err(DownloadError::ApiError(_)) => {
+                // Network or API errors are acceptable in tests
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_to_sqlite_duplicate_handling() {
+        use crate::time_series::{DateRange, TimeSeriesPoint};
+        use chrono::TimeZone;
+        
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        let mut provider = SqliteDataProvider::new_in_memory().unwrap();
+        let asset_key = AssetKey::new_equity("AAPL").unwrap();
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+        );
+
+        // Pre-populate with some existing data
+        let existing_point = TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 3, 16, 0, 0).unwrap(),
+            150.0,
+        );
+        provider.insert_time_series_point(&asset_key, &existing_point).unwrap();
+
+        // Download data - should skip the existing date
+        let result = downloader.download_to_sqlite(&mut provider, &asset_key, &date_range).await;
+        
+        match result {
+            Ok(_count) => {
+                // Should have downloaded data, but skipped the existing date
+                // Verify the existing point is still there
+                let stored_data = provider.get_time_series(&asset_key, &date_range).unwrap();
+                assert!(!stored_data.is_empty());
+                
+                // Check that the pre-existing point is still present
+                let has_existing = stored_data.iter().any(|p| {
+                    p.timestamp.date_naive() == NaiveDate::from_ymd_opt(2024, 1, 3).unwrap()
+                });
+                assert!(has_existing, "Pre-existing data point should still be present");
+            }
+            Err(DownloadError::NetworkError(_)) | Err(DownloadError::ApiError(_)) => {
+                // Network or API errors are acceptable in tests
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_to_sqlite_all_dates_exist() {
+        use crate::time_series::{DateRange, TimeSeriesPoint};
+        use chrono::TimeZone;
+        
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        let mut provider = SqliteDataProvider::new_in_memory().unwrap();
+        let asset_key = AssetKey::new_equity("AAPL").unwrap();
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+
+        // Pre-populate with data for all dates in range
+        let point1 = TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 1, 16, 0, 0).unwrap(),
+            150.0,
+        );
+        let point2 = TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 2, 16, 0, 0).unwrap(),
+            151.0,
+        );
+        let point3 = TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 3, 16, 0, 0).unwrap(),
+            152.0,
+        );
+        provider.insert_time_series_point(&asset_key, &point1).unwrap();
+        provider.insert_time_series_point(&asset_key, &point2).unwrap();
+        provider.insert_time_series_point(&asset_key, &point3).unwrap();
+
+        // Download data - should return 0 since all dates exist
+        let result = downloader.download_to_sqlite(&mut provider, &asset_key, &date_range).await;
+        
+        match result {
+            Ok(count) => {
+                // Should return 0 since all dates already exist
+                assert_eq!(count, 0);
+                
+                // Verify existing data is still intact
+                let stored_data = provider.get_time_series(&asset_key, &date_range).unwrap();
+                assert_eq!(stored_data.len(), 3);
+            }
+            Err(DownloadError::NetworkError(_)) | Err(DownloadError::ApiError(_)) => {
+                // Network or API errors are acceptable in tests
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_to_sqlite_batch_insert() {
+        use crate::time_series::DateRange;
+        
+        let downloader = YahooFinanceDownloader::new().unwrap();
+        let mut provider = SqliteDataProvider::new_in_memory().unwrap();
+        let asset_key = AssetKey::new_equity("AAPL").unwrap();
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+        );
+
+        // Download data - should use batch insert
+        let result = downloader.download_to_sqlite(&mut provider, &asset_key, &date_range).await;
+        
+        match result {
+            Ok(count) => {
+                // If successful, verify multiple points were stored (batch insert)
+                if count > 0 {
+                    let stored_data = provider.get_time_series(&asset_key, &date_range).unwrap();
+                    assert_eq!(stored_data.len(), count);
+                    // Verify data is sorted chronologically
+                    for i in 1..stored_data.len() {
+                        assert!(stored_data[i].timestamp >= stored_data[i-1].timestamp);
+                    }
+                }
+            }
+            Err(DownloadError::NetworkError(_)) | Err(DownloadError::ApiError(_)) => {
+                // Network or API errors are acceptable in tests
             }
             Err(e) => panic!("Unexpected error: {:?}", e),
         }

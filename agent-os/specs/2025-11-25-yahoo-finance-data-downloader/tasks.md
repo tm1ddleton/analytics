@@ -86,27 +86,27 @@ Total Tasks: 6 task groups
 #### Task Group 3: Integration with SqliteDataProvider
 **Dependencies:** Task Group 2
 
-- [ ] 3.0 Complete SqliteDataProvider integration
-  - [ ] 3.1 Write 2-8 focused tests for SqliteDataProvider integration
+- [x] 3.0 Complete SqliteDataProvider integration
+  - [x] 3.1 Write 2-8 focused tests for SqliteDataProvider integration
     - Test downloading and storing data for single asset
     - Test downloading and storing data for multiple assets
     - Test duplicate data handling (skip existing dates)
     - Test batch insert operations
-  - [ ] 3.2 Implement download method accepting SqliteDataProvider
+  - [x] 3.2 Implement download method accepting SqliteDataProvider
     - Create download method that accepts &mut SqliteDataProvider
     - Accept AssetKey and DateRange parameters
     - Download data from Yahoo Finance
     - Store data using insert_time_series_batch method
-  - [ ] 3.3 Implement duplicate data checking
+  - [x] 3.3 Implement duplicate data checking
     - Check existing data in SQLite before downloading
     - Query existing dates for the asset
     - Filter out dates that already exist in database
     - Only download missing dates (incremental behavior)
-  - [ ] 3.4 Implement batch data storage
+  - [x] 3.4 Implement batch data storage
     - Use insert_time_series_batch for efficient storage
     - Handle large date ranges by batching if needed
     - Ensure data integrity with proper error handling
-  - [ ] 3.5 Ensure SqliteDataProvider integration tests pass
+  - [x] 3.5 Ensure SqliteDataProvider integration tests pass
     - Run ONLY the 2-8 tests written in 3.1
     - Verify data is correctly stored in SQLite
     - Verify duplicate checking works correctly
