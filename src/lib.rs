@@ -8,6 +8,7 @@ pub mod yahoo_finance;
 pub mod dag;
 pub mod analytics;
 pub mod push_mode;
+pub mod replay;
 
 #[cfg(test)]
 mod integration_tests;
@@ -30,4 +31,5 @@ pub use analytics::{
     apply_output_mode,
 };
 pub use push_mode::{CircularBuffer, PushModeEngine, PushError, InitError, NodeState, NodePushState};
+pub use replay::{ReplayEngine, ReplayError, ReplayResult};
 

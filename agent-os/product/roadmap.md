@@ -2,13 +2,13 @@
 
 ## POC Phase (Immediate Focus)
 
-1. [ ] Core Asset Data Model — Implement asset objects as first-class entities with key-based identification, metadata storage, and time-series data attachment capabilities `M`
-2. [ ] SQLite Data Storage — Implement simple SQLite-based storage for asset data and computed analytics with key-based and date-range query capabilities `S`
-3. [ ] Yahoo Finance Data Downloader — Create data ingestion module that downloads historical market data from Yahoo Finance (or alternative free APIs) and stores in SQLite `S`
-4. [ ] DAG Computation Framework — Build DAG construction and execution engine using appropriate Rust libraries (e.g., petgraph) to wire analytics dependencies explicitly with cycle detection and topological sorting `L`
-5. [ ] Push-Mode Analytics Engine — Implement incremental computation system where analytics update automatically when new data arrives, with dependency propagation through the DAG `XL`
-6. [ ] Basic Analytics Library — Create foundational analytics calculations (e.g., moving averages, returns, volatility) that work in push mode `M`
-7. [ ] High-Speed Data Replay System — Implement replay engine that reads historical data from SQLite and feeds it into push-mode analytics at configurable high speed (faster than real-time) `M`
+1. [x] Core Asset Data Model — Implement asset objects as first-class entities with key-based identification, metadata storage, and time-series data attachment capabilities `M`
+2. [x] SQLite Data Storage — Implement simple SQLite-based storage for asset data and computed analytics with key-based and date-range query capabilities `S`
+3. [x] Yahoo Finance Data Downloader — Create data ingestion module that downloads historical market data from Yahoo Finance (or alternative free APIs) and stores in SQLite `S`
+4. [x] DAG Computation Framework — Build DAG construction and execution engine using appropriate Rust libraries (e.g., petgraph) to wire analytics dependencies explicitly with cycle detection and topological sorting `L`
+5. [x] Push-Mode Analytics Engine — Implement incremental computation system where analytics update automatically when new data arrives, with dependency propagation through the DAG `XL`
+6. [x] Basic Analytics Library — Create foundational analytics calculations (e.g., moving averages, returns, volatility) that work in push mode `M`
+7. [x] High-Speed Data Replay System — Implement replay engine that reads historical data from SQLite and feeds it into push-mode analytics at configurable high speed (faster than real-time) `M`
 8. [ ] REST API Server with WebSocket/SSE — Build HTTP server with REST endpoints for querying analytics and WebSocket or Server-Sent Events for real-time push updates to UI `M`
 9. [ ] React UI Dashboard — Create React frontend that connects to REST API, displays real-time analytics updates via WebSocket/SSE, shows asset data visualization, and includes controls for replay speed and asset selection `L`
 
