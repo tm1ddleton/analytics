@@ -199,11 +199,23 @@ impl Future {
             // Get data from current contract for this date
             let contract = contracts[current_contract_idx];
             let single_day_range = DateRange::new(current_date, current_date);
-            let contract_data = provider.get_time_series(contract.key(), &single_day_range)?;
-
-            // Add the first point for this date (if any)
-            if let Some(point) = contract_data.first() {
-                rolling_series.push(point.clone());
+            
+            // Handle missing data gracefully - if asset not found or no data, skip this date
+            match provider.get_time_series(contract.key(), &single_day_range) {
+                Ok(contract_data) => {
+                    // Add the first point for this date (if any)
+                    if let Some(point) = contract_data.first() {
+                        rolling_series.push(point.clone());
+                    }
+                }
+                Err(crate::time_series::DataProviderError::AssetNotFound) => {
+                    // Asset not found - skip this date, continue to next date
+                    // This is expected when data is missing
+                }
+                Err(e) => {
+                    // Other errors (like InvalidDateRange) should be propagated
+                    return Err(e);
+                }
             }
 
             // Move to next day
