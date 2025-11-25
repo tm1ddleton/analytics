@@ -1,5 +1,6 @@
 use crate::asset::{Asset, AssetType};
 use crate::asset_key::AssetKey;
+use crate::time_series::{DataProvider, DateRange, TimeSeriesPoint};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +136,25 @@ impl Equity {
     pub fn corporate_actions(&self) -> &[CorporateAction] {
         &self.corporate_actions
     }
+
+    /// Queries time-series data for this equity from a data provider.
+    /// 
+    /// # Arguments
+    /// * `provider` - The data provider to query from (not stored in the asset)
+    /// * `date_range` - The date range to query
+    /// 
+    /// # Returns
+    /// Returns `Ok(Vec<TimeSeriesPoint>)` if successful, or an error if the query fails.
+    /// 
+    /// # Errors
+    /// Returns an error if the asset is not found in the data provider or if the query fails.
+    pub fn get_time_series(
+        &self,
+        provider: &dyn DataProvider,
+        date_range: &DateRange,
+    ) -> Result<Vec<TimeSeriesPoint>, crate::time_series::DataProviderError> {
+        provider.get_time_series(self.key(), date_range)
+    }
 }
 
 impl Asset for Equity {
@@ -248,6 +268,42 @@ mod tests {
             "Finance",
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_equity_query_time_series() {
+        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use chrono::{TimeZone, Utc};
+
+        let equity = Equity::new(
+            "AAPL",
+            "Apple Inc.",
+            "NASDAQ",
+            "USD",
+            "Technology",
+        ).unwrap();
+
+        let mut provider = InMemoryDataProvider::new();
+        let points = vec![
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
+                150.0,
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
+                151.0,
+            ),
+        ];
+        provider.add_data(equity.key().clone(), points);
+
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
+        );
+
+        let result = equity.get_time_series(&provider, &date_range).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].close_price, 150.0);
     }
 }
 

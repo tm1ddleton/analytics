@@ -82,29 +82,29 @@ Total Tasks: 4 task groups
 #### Task Group 3: Time-Series Data and Data Source Abstraction
 **Dependencies:** Task Group 2
 
-- [ ] 3.0 Complete time-series data structures and data source abstraction
-  - [ ] 3.1 Write 2-8 focused tests for time-series and data access
+- [x] 3.0 Complete time-series data structures and data source abstraction
+  - [x] 3.1 Write 2-8 focused tests for time-series and data access
     - Test time-series data structure (timestamp + close price)
     - Test data source trait implementation
     - Test asset querying data on-demand
     - Test data source agnostic design (no DB coupling)
-  - [ ] 3.2 Create TimeSeriesPoint struct for close price data
+  - [x] 3.2 Create TimeSeriesPoint struct for close price data
     - Fields: timestamp (DateTime or similar), close_price (f64 or Decimal)
     - Support Vec<TimeSeriesPoint> for series data
     - Ensure immutability
-  - [ ] 3.3 Create DataProvider trait for data source abstraction
+  - [x] 3.3 Create DataProvider trait for data source abstraction
     - Define trait methods: get_time_series(asset_key, date_range) -> Result<Vec<TimeSeriesPoint>>
     - Ensure trait is generic and not coupled to any database
     - Support multiple implementations (SQLite, in-memory, API, etc.)
-  - [ ] 3.4 Integrate data provider into Asset types
+  - [x] 3.4 Integrate data provider into Asset types
     - Add method to query time-series data via DataProvider trait
     - Ensure assets remain agnostic about data source
     - Do not store data provider in asset struct (pass as parameter)
-  - [ ] 3.5 Create in-memory DataProvider implementation for testing
+  - [x] 3.5 Create in-memory DataProvider implementation for testing
     - Simple HashMap-based storage for test data
     - Implement DataProvider trait
     - Support date range queries
-  - [ ] 3.6 Ensure time-series and data access tests pass
+  - [x] 3.6 Ensure time-series and data access tests pass
     - Run ONLY the 2-8 tests written in 3.1
     - Verify data source abstraction works
     - Do NOT run the entire test suite at this stage

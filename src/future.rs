@@ -1,5 +1,6 @@
 use crate::asset::{Asset, AssetType};
 use crate::asset_key::AssetKey;
+use crate::time_series::{DataProvider, DateRange, TimeSeriesPoint};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +129,25 @@ impl Future {
     pub fn rollover_date(&self) -> NaiveDate {
         self.expiry_calendar.rollover_date(self.expiry_date)
     }
+
+    /// Queries time-series data for this future from a data provider.
+    /// 
+    /// # Arguments
+    /// * `provider` - The data provider to query from (not stored in the asset)
+    /// * `date_range` - The date range to query
+    /// 
+    /// # Returns
+    /// Returns `Ok(Vec<TimeSeriesPoint>)` if successful, or an error if the query fails.
+    /// 
+    /// # Errors
+    /// Returns an error if the asset is not found in the data provider or if the query fails.
+    pub fn get_time_series(
+        &self,
+        provider: &dyn DataProvider,
+        date_range: &DateRange,
+    ) -> Result<Vec<TimeSeriesPoint>, crate::time_series::DataProviderError> {
+        provider.get_time_series(self.key(), date_range)
+    }
 }
 
 impl Asset for Future {
@@ -252,6 +272,46 @@ mod tests {
             5,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_future_query_time_series() {
+        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use chrono::{TimeZone, Utc};
+
+        let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
+        let future = Future::new(
+            "ES",
+            expiry,
+            "2024-12",
+            "E-mini S&P 500",
+            "CME",
+            "USD",
+            "CME",
+            5,
+        ).unwrap();
+
+        let mut provider = InMemoryDataProvider::new();
+        let points = vec![
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 15, 16, 0, 0).unwrap(),
+                4500.0,
+            ),
+            TimeSeriesPoint::new(
+                Utc.with_ymd_and_hms(2024, 12, 16, 16, 0, 0).unwrap(),
+                4510.0,
+            ),
+        ];
+        provider.add_data(future.key().clone(), points);
+
+        let date_range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 12, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 16).unwrap(),
+        );
+
+        let result = future.get_time_series(&provider, &date_range).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].close_price, 4500.0);
     }
 }
 
