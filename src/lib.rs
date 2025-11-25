@@ -15,5 +15,5 @@ pub use equity::{Equity, CorporateAction, AssetMetadata};
 pub use future::{Future, ExpiryCalendar};
 pub use time_series::{TimeSeriesPoint, DateRange, DataProvider, DataProviderError, InMemoryDataProvider};
 pub use sqlite_provider::SqliteDataProvider;
-pub use yahoo_finance::{YahooFinanceDownloader, DownloaderConfig, DownloadError};
+pub use yahoo_finance::{YahooFinanceDownloader, DownloaderConfig, DownloadError, DownloadResult};
 
