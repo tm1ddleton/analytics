@@ -1,0 +1,1 @@
+Node design refactor: align node keying with salsa-style interned keys, ensure push/pull DAG nodes share same key representation without forcing identical node structures. Focus on node identifiers, node metadata, and compatibility for push-mode replay while keeping the DAG semantics consistent. No further instructions yet.

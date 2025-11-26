@@ -1,5 +1,5 @@
 use analytics::{
-    YahooFinanceDownloader, DownloaderConfig, AssetKey, SqliteDataProvider, DateRange, DataProvider,
+    AssetKey, DataProvider, DateRange, DownloaderConfig, SqliteDataProvider, YahooFinanceDownloader,
 };
 use chrono::NaiveDate;
 
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Assets to download
     let tickers = vec!["AAPL", "MSFT", "GOOG"];
-    
+
     println!("Assets: {}", tickers.join(", "));
     println!("Date range: 2024-01-01 to 2024-12-31");
     println!();
@@ -70,19 +70,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify data by checking the database
     println!("🔍 Verifying database...");
-    
+
     for ticker in result.successful.keys() {
         let asset_key = AssetKey::new_equity(ticker.as_str())?;
-        
+
         // Get some sample data
         let sample_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
         );
-        
+
         let data = provider.get_time_series(&asset_key, &sample_range)?;
-        
-        println!("  • {}: {} data points (sample from Jan 2024)", ticker, data.len());
+
+        println!(
+            "  • {}: {} data points (sample from Jan 2024)",
+            ticker,
+            data.len()
+        );
     }
     println!();
 
@@ -95,4 +99,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

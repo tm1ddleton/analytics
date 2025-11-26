@@ -6,7 +6,7 @@ mod routes;
 mod state;
 
 pub use error::ApiError;
-pub use state::{AppState, SessionStatus, AnalyticConfig};
+pub use state::{AnalyticConfig, AppState, SessionStatus};
 
 use crate::sqlite_provider::SqliteDataProvider;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
 
     // Create data provider
     let data_provider = SqliteDataProvider::new(&config.database_path)?;
-    
+
     // Create application state
     let state = Arc::new(AppState::new(data_provider));
 
@@ -81,12 +81,11 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
     // Build server address
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    
+
     tracing::info!("Server listening on http://{}", addr);
-    
+
     // Run server
     axum::serve(listener, app).await?;
 
     Ok(())
 }
-

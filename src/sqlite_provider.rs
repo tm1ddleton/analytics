@@ -9,7 +9,7 @@ use serde_json;
 use std::path::Path;
 
 /// SQLite-based data provider implementation.
-/// 
+///
 /// Stores asset data, time-series data, and analytics in SQLite database.
 /// Automatically creates schema on first use.
 #[derive(Debug)]
@@ -19,13 +19,13 @@ pub struct SqliteDataProvider {
 
 impl SqliteDataProvider {
     /// Creates a new SQLite data provider with a file-based database.
-    /// 
+    ///
     /// # Arguments
     /// * `db_path` - Path to the SQLite database file. If the file doesn't exist, it will be created.
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(SqliteDataProvider)` if successful, or an error if connection fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the database connection cannot be established.
     pub fn new<P: AsRef<Path>>(db_path: P) -> SqliteResult<Self> {
@@ -36,9 +36,9 @@ impl SqliteDataProvider {
     }
 
     /// Creates a new SQLite data provider with an in-memory database.
-    /// 
+    ///
     /// Useful for testing.
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(SqliteDataProvider)` if successful, or an error if connection fails.
     pub fn new_in_memory() -> SqliteResult<Self> {
@@ -49,7 +49,7 @@ impl SqliteDataProvider {
     }
 
     /// Ensures the database schema exists, creating tables if they don't exist.
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if schema creation fails.
     fn ensure_schema(&self) -> SqliteResult<()> {
@@ -99,39 +99,39 @@ impl SqliteDataProvider {
     }
 
     /// Checks if a table exists in the database.
-    /// 
+    ///
     /// # Arguments
     /// * `table_name` - Name of the table to check
-    /// 
+    ///
     /// # Returns
     /// Returns `true` if the table exists, `false` otherwise.
     #[cfg(test)]
     fn table_exists(&self, table_name: &str) -> SqliteResult<bool> {
-        let mut stmt = self.conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?1")?;
         let exists = stmt.exists([table_name])?;
         Ok(exists)
     }
 
     /// Returns a reference to the underlying SQLite connection.
-    /// 
+    ///
     /// This is useful for implementing additional methods that need direct database access.
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
 
     /// Inserts a single time-series point into the database.
-    /// 
+    ///
     /// If a point with the same asset_key and timestamp already exists, it will be replaced (upsert).
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key for this time-series point
     /// * `point` - The time-series point to insert
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if insertion fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the database operation fails.
     pub fn insert_time_series_point(
@@ -153,17 +153,17 @@ impl SqliteDataProvider {
     }
 
     /// Inserts multiple time-series points in a single transaction.
-    /// 
+    ///
     /// This is more efficient than inserting points one by one.
     /// If any point fails to insert, the entire transaction is rolled back.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key for all time-series points
     /// * `points` - Vector of time-series points to insert
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if all points are inserted successfully, or an error if any insertion fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the database operation fails. The transaction will be rolled back.
     pub fn insert_time_series_batch(
@@ -190,27 +190,33 @@ impl SqliteDataProvider {
 
             for point in points {
                 let timestamp_str = point.timestamp.to_rfc3339();
-                stmt.execute(rusqlite::params![asset_key_str, timestamp_str, point.close_price])
-                    .map_err(|e| DataProviderError::Other(format!("Failed to insert point in batch: {}", e)))?;
+                stmt.execute(rusqlite::params![
+                    asset_key_str,
+                    timestamp_str,
+                    point.close_price
+                ])
+                .map_err(|e| {
+                    DataProviderError::Other(format!("Failed to insert point in batch: {}", e))
+                })?;
             }
         }
 
-        transaction
-            .commit()
-            .map_err(|e| DataProviderError::Other(format!("Failed to commit transaction: {}", e)))?;
+        transaction.commit().map_err(|e| {
+            DataProviderError::Other(format!("Failed to commit transaction: {}", e))
+        })?;
 
         Ok(())
     }
 
     /// Updates an existing time-series point in the database.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key for this time-series point
     /// * `point` - The time-series point to update (must have matching timestamp)
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if update fails or point doesn't exist.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the point doesn't exist or if the database operation fails.
     pub fn update_time_series_point(
@@ -240,15 +246,15 @@ impl SqliteDataProvider {
     }
 
     /// Stores an Equity asset in the database as a JSON blob.
-    /// 
+    ///
     /// If an asset with the same asset_key already exists, it will be replaced.
-    /// 
+    ///
     /// # Arguments
     /// * `equity` - The Equity asset to store
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if storage fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if serialization or database operation fails.
     pub fn store_asset_equity(&self, equity: &Equity) -> Result<(), DataProviderError> {
@@ -267,15 +273,15 @@ impl SqliteDataProvider {
     }
 
     /// Stores a Future asset in the database as a JSON blob.
-    /// 
+    ///
     /// If an asset with the same asset_key already exists, it will be replaced.
-    /// 
+    ///
     /// # Arguments
     /// * `future` - The Future asset to store
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if storage fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if serialization or database operation fails.
     pub fn store_asset_future(&self, future: &Future) -> Result<(), DataProviderError> {
@@ -294,13 +300,13 @@ impl SqliteDataProvider {
     }
 
     /// Retrieves an Equity asset from the database by asset_key.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key to retrieve
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Equity)` if found, or an error if not found or deserialization fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the asset is not found, is not an Equity, or deserialization fails.
     pub fn get_asset_equity(&self, asset_key: &AssetKey) -> Result<Equity, DataProviderError> {
@@ -320,8 +326,9 @@ impl SqliteDataProvider {
                 }
             })?;
 
-        let equity: Equity = serde_json::from_str(&asset_json)
-            .map_err(|e| DataProviderError::Other(format!("Failed to deserialize Equity: {}", e)))?;
+        let equity: Equity = serde_json::from_str(&asset_json).map_err(|e| {
+            DataProviderError::Other(format!("Failed to deserialize Equity: {}", e))
+        })?;
 
         // Verify the asset key matches
         if equity.key() != asset_key {
@@ -336,13 +343,13 @@ impl SqliteDataProvider {
     }
 
     /// Retrieves a Future asset from the database by asset_key.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key to retrieve
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Future)` if found, or an error if not found or deserialization fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the asset is not found, is not a Future, or deserialization fails.
     pub fn get_asset_future(&self, asset_key: &AssetKey) -> Result<Future, DataProviderError> {
@@ -362,8 +369,9 @@ impl SqliteDataProvider {
                 }
             })?;
 
-        let future: Future = serde_json::from_str(&asset_json)
-            .map_err(|e| DataProviderError::Other(format!("Failed to deserialize Future: {}", e)))?;
+        let future: Future = serde_json::from_str(&asset_json).map_err(|e| {
+            DataProviderError::Other(format!("Failed to deserialize Future: {}", e))
+        })?;
 
         // Verify the asset key matches
         if future.key() != asset_key {
@@ -378,19 +386,19 @@ impl SqliteDataProvider {
     }
 
     /// Stores an analytics result in the database.
-    /// 
+    ///
     /// The analytics value is stored as a JSON blob for flexibility.
     /// If an analytics result with the same (asset_key, date, analytics_name) already exists, it will be replaced.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key for this analytics result
     /// * `date` - The date for this analytics result
     /// * `analytics_name` - The name/identifier of the analytics (e.g., "sma_20", "rsi")
     /// * `value` - The analytics value (will be serialized as JSON)
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(())` if successful, or an error if storage fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if serialization or database operation fails.
     pub fn store_analytics<V: serde::Serialize>(
@@ -402,8 +410,9 @@ impl SqliteDataProvider {
     ) -> Result<(), DataProviderError> {
         let asset_key_str = asset_key.as_string();
         let date_str = date.format("%Y-%m-%d").to_string();
-        let value_json = serde_json::to_string(value)
-            .map_err(|e| DataProviderError::Other(format!("Failed to serialize analytics value: {}", e)))?;
+        let value_json = serde_json::to_string(value).map_err(|e| {
+            DataProviderError::Other(format!("Failed to serialize analytics value: {}", e))
+        })?;
 
         self.conn
             .execute(
@@ -416,15 +425,15 @@ impl SqliteDataProvider {
     }
 
     /// Retrieves analytics results for a given asset key and date range.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key to query
     /// * `date_range` - The date range to query (inclusive)
-    /// 
+    ///
     /// # Returns
     /// Returns a vector of tuples: (date, analytics_name, value_json_string).
     /// Returns an empty vector if no analytics are found.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the database query fails.
     pub fn get_analytics(
@@ -453,26 +462,33 @@ impl SqliteDataProvider {
             .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
         let rows = stmt
-            .query_map(
-                [&asset_key_str, &start_date_str, &end_date_str],
-                |row| {
-                    let date_str: String = row.get(0)?;
-                    let analytics_name: String = row.get(1)?;
-                    let value_json: String = row.get(2)?;
+            .query_map([&asset_key_str, &start_date_str, &end_date_str], |row| {
+                let date_str: String = row.get(0)?;
+                let analytics_name: String = row.get(1)?;
+                let value_json: String = row.get(2)?;
 
-                    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                        .map_err(|e| rusqlite::Error::InvalidColumnType(0, format!("Invalid date: {}", e), rusqlite::types::Type::Text))?;
+                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                    rusqlite::Error::InvalidColumnType(
+                        0,
+                        format!("Invalid date: {}", e),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
 
-                    Ok((date, analytics_name, value_json))
-                },
-            )
+                Ok((date, analytics_name, value_json))
+            })
             .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
         let mut results = Vec::new();
         for row_result in rows {
             match row_result {
                 Ok(result) => results.push(result),
-                Err(e) => return Err(DataProviderError::Other(format!("Row parsing error: {}", e))),
+                Err(e) => {
+                    return Err(DataProviderError::Other(format!(
+                        "Row parsing error: {}",
+                        e
+                    )))
+                }
             }
         }
 
@@ -480,17 +496,17 @@ impl SqliteDataProvider {
     }
 
     /// Retrieves analytics results by analytics name across all assets for a given date range.
-    /// 
+    ///
     /// This is useful for cross-asset analysis (e.g., comparing RSI across multiple assets).
-    /// 
+    ///
     /// # Arguments
     /// * `analytics_name` - The name/identifier of the analytics to query
     /// * `date_range` - The date range to query (inclusive)
-    /// 
+    ///
     /// # Returns
     /// Returns a vector of tuples: (asset_key_string, date, value_json_string).
     /// Returns an empty vector if no analytics are found.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the database query fails.
     pub fn get_analytics_by_name(
@@ -518,26 +534,33 @@ impl SqliteDataProvider {
             .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
         let rows = stmt
-            .query_map(
-                [analytics_name, &start_date_str, &end_date_str],
-                |row| {
-                    let asset_key_str: String = row.get(0)?;
-                    let date_str: String = row.get(1)?;
-                    let value_json: String = row.get(2)?;
+            .query_map([analytics_name, &start_date_str, &end_date_str], |row| {
+                let asset_key_str: String = row.get(0)?;
+                let date_str: String = row.get(1)?;
+                let value_json: String = row.get(2)?;
 
-                    let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-                        .map_err(|e| rusqlite::Error::InvalidColumnType(1, format!("Invalid date: {}", e), rusqlite::types::Type::Text))?;
+                let date = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d").map_err(|e| {
+                    rusqlite::Error::InvalidColumnType(
+                        1,
+                        format!("Invalid date: {}", e),
+                        rusqlite::types::Type::Text,
+                    )
+                })?;
 
-                    Ok((asset_key_str, date, value_json))
-                },
-            )
+                Ok((asset_key_str, date, value_json))
+            })
             .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
         let mut results = Vec::new();
         for row_result in rows {
             match row_result {
                 Ok(result) => results.push(result),
-                Err(e) => return Err(DataProviderError::Other(format!("Row parsing error: {}", e))),
+                Err(e) => {
+                    return Err(DataProviderError::Other(format!(
+                        "Row parsing error: {}",
+                        e
+                    )))
+                }
             }
         }
 
@@ -565,47 +588,62 @@ impl DataProvider for SqliteDataProvider {
 
         // Query time-series data using prepared statement for performance
         // Use date() function to extract date part from timestamp for comparison
-        let mut stmt = self.conn.prepare(
-            "SELECT timestamp, close_price FROM time_series_data 
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT timestamp, close_price FROM time_series_data 
              WHERE asset_key = ?1 
              AND date(timestamp) >= ?2 
              AND date(timestamp) <= ?3 
-             ORDER BY timestamp"
-        ).map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
+             ORDER BY timestamp",
+            )
+            .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
-        let rows = stmt.query_map(
-            [&asset_key_str, &start_date_str, &end_date_str],
-            |row| {
+        let rows = stmt
+            .query_map([&asset_key_str, &start_date_str, &end_date_str], |row| {
                 let timestamp_str: String = row.get(0)?;
                 let close_price: f64 = row.get(1)?;
-                
+
                 // Parse timestamp from string (stored as ISO 8601)
                 let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
-                    .map_err(|e| rusqlite::Error::InvalidColumnType(0, format!("Invalid timestamp: {}", e), rusqlite::types::Type::Text))?
+                    .map_err(|e| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            format!("Invalid timestamp: {}", e),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?
                     .with_timezone(&Utc);
-                
+
                 Ok(TimeSeriesPoint::new(timestamp, close_price))
-            }
-        ).map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
+            })
+            .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
 
         let mut points = Vec::new();
         for row_result in rows {
             match row_result {
                 Ok(point) => points.push(point),
-                Err(e) => return Err(DataProviderError::Other(format!("Row parsing error: {}", e))),
+                Err(e) => {
+                    return Err(DataProviderError::Other(format!(
+                        "Row parsing error: {}",
+                        e
+                    )))
+                }
             }
         }
 
         // If no points found, check if asset exists at all
         if points.is_empty() {
             // Check if asset exists in assets table
-            let mut check_stmt = self.conn.prepare(
-                "SELECT 1 FROM assets WHERE asset_key = ?1 LIMIT 1"
-            ).map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
-            
-            let asset_exists = check_stmt.exists([&asset_key_str])
+            let mut check_stmt = self
+                .conn
+                .prepare("SELECT 1 FROM assets WHERE asset_key = ?1 LIMIT 1")
                 .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
-            
+
+            let asset_exists = check_stmt
+                .exists([&asset_key_str])
+                .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
+
             if !asset_exists {
                 return Err(DataProviderError::AssetNotFound);
             }
@@ -631,7 +669,7 @@ mod tests {
     #[test]
     fn test_automatic_schema_creation() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        
+
         // Verify all tables exist
         assert!(provider.table_exists("assets").unwrap());
         assert!(provider.table_exists("time_series_data").unwrap());
@@ -641,7 +679,7 @@ mod tests {
     #[test]
     fn test_table_existence_check() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        
+
         assert!(provider.table_exists("assets").unwrap());
         assert!(provider.table_exists("time_series_data").unwrap());
         assert!(provider.table_exists("analytics").unwrap());
@@ -651,7 +689,7 @@ mod tests {
     #[test]
     fn test_connection_initialization() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        
+
         // Verify connection is accessible
         let _conn = provider.connection();
         // If we can access the connection, initialization was successful
@@ -662,7 +700,7 @@ mod tests {
         // Create provider twice - schema should be created only once
         let provider1 = SqliteDataProvider::new_in_memory().unwrap();
         assert!(provider1.table_exists("assets").unwrap());
-        
+
         // Re-initialize schema (should not fail)
         provider1.ensure_schema().unwrap();
         assert!(provider1.table_exists("assets").unwrap());
@@ -671,16 +709,18 @@ mod tests {
     #[test]
     fn test_indexes_created() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        
+
         // Check that indexes exist by querying sqlite_master
         let mut stmt = provider.connection().prepare(
             "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_time_series%'"
         ).unwrap();
-        
-        let index_names: Vec<String> = stmt.query_map([], |row| {
-            Ok(row.get::<_, String>(0)?)
-        }).unwrap().map(|r| r.unwrap()).collect();
-        
+
+        let index_names: Vec<String> = stmt
+            .query_map([], |row| Ok(row.get::<_, String>(0)?))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
         assert!(index_names.contains(&"idx_time_series_asset_key".to_string()));
         assert!(index_names.contains(&"idx_time_series_timestamp".to_string()));
     }
@@ -828,7 +868,9 @@ mod tests {
         let point = TimeSeriesPoint::new(timestamp, 150.0);
 
         // Insert the point
-        provider.insert_time_series_point(&asset_key, &point).unwrap();
+        provider
+            .insert_time_series_point(&asset_key, &point)
+            .unwrap();
 
         // Verify it was inserted
         let date_range = DateRange::new(
@@ -845,7 +887,7 @@ mod tests {
     fn test_insert_time_series_point_batch() {
         let mut provider = SqliteDataProvider::new_in_memory().unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let points = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 150.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 151.0),
@@ -853,7 +895,9 @@ mod tests {
         ];
 
         // Insert batch
-        provider.insert_time_series_batch(&asset_key, &points).unwrap();
+        provider
+            .insert_time_series_batch(&asset_key, &points)
+            .unwrap();
 
         // Verify all points were inserted
         let date_range = DateRange::new(
@@ -872,14 +916,18 @@ mod tests {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
         let timestamp = Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap();
-        
+
         // Insert initial point
         let point1 = TimeSeriesPoint::new(timestamp, 150.0);
-        provider.insert_time_series_point(&asset_key, &point1).unwrap();
+        provider
+            .insert_time_series_point(&asset_key, &point1)
+            .unwrap();
 
         // Insert point with same timestamp but different price (should replace)
         let point2 = TimeSeriesPoint::new(timestamp, 155.0);
-        provider.insert_time_series_point(&asset_key, &point2).unwrap();
+        provider
+            .insert_time_series_point(&asset_key, &point2)
+            .unwrap();
 
         // Verify only one point exists with updated price
         let date_range = DateRange::new(
@@ -896,21 +944,25 @@ mod tests {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
         let asset_key1 = AssetKey::new_equity("AAPL").unwrap();
         let asset_key2 = AssetKey::new_equity("MSFT").unwrap();
-        
+
         let timestamp = Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap();
         let point1 = TimeSeriesPoint::new(timestamp, 150.0);
         let point2 = TimeSeriesPoint::new(timestamp, 300.0);
 
         // Insert points for different assets
-        provider.insert_time_series_point(&asset_key1, &point1).unwrap();
-        provider.insert_time_series_point(&asset_key2, &point2).unwrap();
+        provider
+            .insert_time_series_point(&asset_key1, &point1)
+            .unwrap();
+        provider
+            .insert_time_series_point(&asset_key2, &point2)
+            .unwrap();
 
         // Verify both assets have their own data
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
         );
-        
+
         let result1 = provider.get_time_series(&asset_key1, &date_range).unwrap();
         assert_eq!(result1.len(), 1);
         assert_eq!(result1[0].close_price, 150.0);
@@ -927,7 +979,9 @@ mod tests {
         let points: Vec<TimeSeriesPoint> = vec![];
 
         // Insert empty batch should succeed
-        provider.insert_time_series_batch(&asset_key, &points).unwrap();
+        provider
+            .insert_time_series_batch(&asset_key, &points)
+            .unwrap();
     }
 
     #[test]
@@ -935,14 +989,18 @@ mod tests {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
         let timestamp = Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap();
-        
+
         // Insert initial point
         let point1 = TimeSeriesPoint::new(timestamp, 150.0);
-        provider.insert_time_series_point(&asset_key, &point1).unwrap();
+        provider
+            .insert_time_series_point(&asset_key, &point1)
+            .unwrap();
 
         // Update the point
         let point2 = TimeSeriesPoint::new(timestamp, 155.0);
-        provider.update_time_series_point(&asset_key, &point2).unwrap();
+        provider
+            .update_time_series_point(&asset_key, &point2)
+            .unwrap();
 
         // Verify updated price
         let date_range = DateRange::new(
@@ -970,13 +1028,7 @@ mod tests {
     #[test]
     fn test_store_asset_equity() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         // Store the equity
         provider.store_asset_equity(&equity).unwrap();
@@ -1002,7 +1054,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Store the future
         provider.store_asset_future(&future).unwrap();
@@ -1034,7 +1087,9 @@ mod tests {
         let value = 150.5;
 
         // Store analytics
-        provider.store_analytics(&asset_key, date, analytics_name, &value).unwrap();
+        provider
+            .store_analytics(&asset_key, date, analytics_name, &value)
+            .unwrap();
 
         // Verify it was stored
         let date_range = DateRange::new(date, date);
@@ -1042,7 +1097,7 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, date);
         assert_eq!(results[0].1, analytics_name);
-        
+
         // Deserialize the value
         let retrieved_value: f64 = serde_json::from_str(&results[0].2).unwrap();
         assert_eq!(retrieved_value, value);
@@ -1052,15 +1107,21 @@ mod tests {
     fn test_get_analytics_date_range() {
         let provider = SqliteDataProvider::new_in_memory().unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Store analytics for multiple dates
         let date1 = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let date2 = NaiveDate::from_ymd_opt(2024, 1, 16).unwrap();
         let date3 = NaiveDate::from_ymd_opt(2024, 1, 17).unwrap();
 
-        provider.store_analytics(&asset_key, date1, "sma_20", &150.0).unwrap();
-        provider.store_analytics(&asset_key, date2, "sma_20", &151.0).unwrap();
-        provider.store_analytics(&asset_key, date3, "sma_20", &152.0).unwrap();
+        provider
+            .store_analytics(&asset_key, date1, "sma_20", &150.0)
+            .unwrap();
+        provider
+            .store_analytics(&asset_key, date2, "sma_20", &151.0)
+            .unwrap();
+        provider
+            .store_analytics(&asset_key, date3, "sma_20", &152.0)
+            .unwrap();
 
         // Query date range
         let date_range = DateRange::new(date1, date2);
@@ -1079,14 +1140,20 @@ mod tests {
         let analytics_name = "rsi";
 
         // Store analytics for different assets
-        provider.store_analytics(&asset_key1, date, analytics_name, &65.5).unwrap();
-        provider.store_analytics(&asset_key2, date, analytics_name, &70.2).unwrap();
+        provider
+            .store_analytics(&asset_key1, date, analytics_name, &65.5)
+            .unwrap();
+        provider
+            .store_analytics(&asset_key2, date, analytics_name, &70.2)
+            .unwrap();
 
         // Query by analytics name
         let date_range = DateRange::new(date, date);
-        let results = provider.get_analytics_by_name(analytics_name, &date_range).unwrap();
+        let results = provider
+            .get_analytics_by_name(analytics_name, &date_range)
+            .unwrap();
         assert_eq!(results.len(), 2);
-        
+
         // Verify both assets are included
         let asset_keys: Vec<String> = results.iter().map(|r| r.0.clone()).collect();
         assert!(asset_keys.contains(&asset_key1.as_string()));
@@ -1101,10 +1168,14 @@ mod tests {
         let analytics_name = "sma_20";
 
         // Store initial value
-        provider.store_analytics(&asset_key, date, analytics_name, &150.0).unwrap();
+        provider
+            .store_analytics(&asset_key, date, analytics_name, &150.0)
+            .unwrap();
 
         // Update with new value
-        provider.store_analytics(&asset_key, date, analytics_name, &155.0).unwrap();
+        provider
+            .store_analytics(&asset_key, date, analytics_name, &155.0)
+            .unwrap();
 
         // Verify updated value
         let date_range = DateRange::new(date, date);
@@ -1120,13 +1191,7 @@ mod tests {
     fn test_end_to_end_store_asset_and_time_series() {
         // End-to-end workflow: Store asset, then store and query time-series data
         let mut provider = SqliteDataProvider::new_in_memory().unwrap();
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         // Store asset
         provider.store_asset_equity(&equity).unwrap();
@@ -1136,7 +1201,9 @@ mod tests {
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 150.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 151.0),
         ];
-        provider.insert_time_series_batch(equity.key(), &points).unwrap();
+        provider
+            .insert_time_series_batch(equity.key(), &points)
+            .unwrap();
 
         // Query time-series using DataProvider trait
         let date_range = DateRange::new(
@@ -1153,27 +1220,25 @@ mod tests {
     fn test_end_to_end_store_asset_and_analytics() {
         // End-to-end workflow: Store asset, then store and query analytics
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         // Store asset
         provider.store_asset_equity(&equity).unwrap();
 
         // Store analytics
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        provider.store_analytics(equity.key(), date, "sma_20", &150.5).unwrap();
-        provider.store_analytics(equity.key(), date, "rsi", &65.0).unwrap();
+        provider
+            .store_analytics(equity.key(), date, "sma_20", &150.5)
+            .unwrap();
+        provider
+            .store_analytics(equity.key(), date, "rsi", &65.0)
+            .unwrap();
 
         // Query analytics
         let date_range = DateRange::new(date, date);
         let results = provider.get_analytics(equity.key(), &date_range).unwrap();
         assert_eq!(results.len(), 2);
-        
+
         // Verify both analytics are present
         let analytics_names: Vec<String> = results.iter().map(|r| r.1.clone()).collect();
         assert!(analytics_names.contains(&"sma_20".to_string()));
@@ -1186,30 +1251,24 @@ mod tests {
         use std::fs;
         let temp_dir = std::env::temp_dir();
         let db_path = temp_dir.join("test_analytics.db");
-        
+
         // Clean up if exists
         let _ = fs::remove_file(&db_path);
-        
+
         {
             let provider = SqliteDataProvider::new(&db_path).unwrap();
-            let equity = Equity::new(
-                "AAPL",
-                "Apple Inc.",
-                "NASDAQ",
-                "USD",
-                "Technology",
-            ).unwrap();
-            
+            let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
+
             // Store asset
             provider.store_asset_equity(&equity).unwrap();
         }
-        
+
         // Reopen database and verify data persists
         let provider = SqliteDataProvider::new(&db_path).unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
         let retrieved = provider.get_asset_equity(&asset_key).unwrap();
         assert_eq!(retrieved.name(), "Apple Inc.");
-        
+
         // Clean up
         let _ = fs::remove_file(&db_path);
     }
@@ -1222,9 +1281,15 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
 
         // Store multiple analytics
-        provider.store_analytics(&asset_key, date, "sma_20", &150.0).unwrap();
-        provider.store_analytics(&asset_key, date, "sma_50", &148.0).unwrap();
-        provider.store_analytics(&asset_key, date, "rsi", &65.0).unwrap();
+        provider
+            .store_analytics(&asset_key, date, "sma_20", &150.0)
+            .unwrap();
+        provider
+            .store_analytics(&asset_key, date, "sma_50", &148.0)
+            .unwrap();
+        provider
+            .store_analytics(&asset_key, date, "rsi", &65.0)
+            .unwrap();
 
         // Query all analytics for this date
         let date_range = DateRange::new(date, date);
@@ -1255,7 +1320,9 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 16).unwrap(),
         );
 
-        let results = provider.get_analytics_by_name("sma_20", &date_range).unwrap();
+        let results = provider
+            .get_analytics_by_name("sma_20", &date_range)
+            .unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -1263,13 +1330,7 @@ mod tests {
     fn test_time_series_with_asset_stored() {
         // Test that get_time_series returns empty vector (not AssetNotFound) when asset exists but no time-series data
         let provider = SqliteDataProvider::new_in_memory().unwrap();
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         // Store asset but no time-series data
         provider.store_asset_equity(&equity).unwrap();
@@ -1289,7 +1350,8 @@ mod tests {
         // End-to-end workflow: Store multiple assets, store analytics, query by analytics name
         let provider = SqliteDataProvider::new_in_memory().unwrap();
         let equity1 = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
-        let equity2 = Equity::new("MSFT", "Microsoft Corp.", "NASDAQ", "USD", "Technology").unwrap();
+        let equity2 =
+            Equity::new("MSFT", "Microsoft Corp.", "NASDAQ", "USD", "Technology").unwrap();
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
 
         // Store assets
@@ -1297,14 +1359,18 @@ mod tests {
         provider.store_asset_equity(&equity2).unwrap();
 
         // Store analytics for both assets
-        provider.store_analytics(equity1.key(), date, "rsi", &65.0).unwrap();
-        provider.store_analytics(equity2.key(), date, "rsi", &70.0).unwrap();
+        provider
+            .store_analytics(equity1.key(), date, "rsi", &65.0)
+            .unwrap();
+        provider
+            .store_analytics(equity2.key(), date, "rsi", &70.0)
+            .unwrap();
 
         // Query by analytics name across all assets
         let date_range = DateRange::new(date, date);
         let results = provider.get_analytics_by_name("rsi", &date_range).unwrap();
         assert_eq!(results.len(), 2);
-        
+
         // Verify both assets are included
         let asset_keys: Vec<String> = results.iter().map(|r| r.0.clone()).collect();
         assert!(asset_keys.contains(&equity1.key().as_string()));
@@ -1325,7 +1391,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Store future
         provider.store_asset_future(&future).unwrap();
@@ -1333,7 +1400,9 @@ mod tests {
         // Store time-series data
         let timestamp = Utc.with_ymd_and_hms(2024, 12, 15, 16, 0, 0).unwrap();
         let point = TimeSeriesPoint::new(timestamp, 4500.0);
-        provider.insert_time_series_point(future.key(), &point).unwrap();
+        provider
+            .insert_time_series_point(future.key(), &point)
+            .unwrap();
 
         // Retrieve future
         let retrieved = provider.get_asset_future(future.key()).unwrap();
@@ -1350,4 +1419,3 @@ mod tests {
         assert_eq!(result[0].close_price, 4500.0);
     }
 }
-

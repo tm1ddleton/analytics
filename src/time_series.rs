@@ -48,10 +48,10 @@ impl DateRange {
 }
 
 /// Trait for data source abstraction.
-/// 
+///
 /// This trait allows assets to query time-series data from any source
 /// without being coupled to a specific database or storage implementation.
-/// 
+///
 /// Implementations can be:
 /// - In-memory HashMap (for testing)
 /// - SQLite database
@@ -60,14 +60,14 @@ impl DateRange {
 /// - Any other data source
 pub trait DataProvider {
     /// Retrieves time-series data for a given asset key and date range.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key to query data for
     /// * `date_range` - The date range to query (inclusive on both ends)
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Vec<TimeSeriesPoint>)` if successful, or an error if the query fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the asset key is not found, the date range is invalid,
     /// or if there's an issue accessing the data source.
@@ -102,7 +102,7 @@ impl std::fmt::Display for DataProviderError {
 impl std::error::Error for DataProviderError {}
 
 /// In-memory data provider implementation for testing.
-/// 
+///
 /// Stores time-series data in a HashMap keyed by AssetKey.
 /// This allows testing without requiring a database connection.
 #[derive(Debug, Clone)]
@@ -119,7 +119,7 @@ impl InMemoryDataProvider {
     }
 
     /// Adds time-series data for an asset.
-    /// 
+    ///
     /// # Arguments
     /// * `asset_key` - The asset key
     /// * `points` - Vector of time-series points (should be sorted by timestamp)
@@ -197,18 +197,9 @@ mod tests {
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
 
         let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                150.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
-                151.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(),
-                152.0,
-            ),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 150.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 151.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(), 152.0),
         ];
 
         provider.add_data(asset_key.clone(), points);
@@ -257,12 +248,10 @@ mod tests {
         let mut provider = InMemoryDataProvider::new();
         let asset_key = AssetKey::new_equity("MSFT").unwrap();
 
-        let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                400.0,
-            ),
-        ];
+        let points = vec![TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
+            400.0,
+        )];
 
         provider.add_data(asset_key.clone(), points);
 
@@ -282,22 +271,10 @@ mod tests {
         let asset_key = AssetKey::new_equity("GOOGL").unwrap();
 
         let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 14, 16, 0, 0).unwrap(),
-                100.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                101.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
-                102.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(),
-                103.0,
-            ),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 14, 16, 0, 0).unwrap(), 100.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 101.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 102.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(), 103.0),
         ];
 
         provider.add_data(asset_key.clone(), points);
@@ -314,4 +291,3 @@ mod tests {
         assert_eq!(result[1].close_price, 102.0);
     }
 }
-

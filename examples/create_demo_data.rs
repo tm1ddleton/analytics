@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (ticker, base_price) in tickers.iter().zip(base_prices.iter()) {
         println!("Generating data for {}...", ticker);
-        
+
         // Insert asset (with minimal asset_data as JSON)
         let asset_data = format!(r#"{{"ticker": "{}"}}"#, ticker);
         conn.execute(
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Simulate some price movement
                 let change_pct = (rand::random::<f64>() - 0.5) * 0.04; // +/- 2% daily
                 price = price * (1.0 + change_pct);
-                
+
                 let close = price;
 
                 let datetime = Utc.from_utc_datetime(&date.and_hms_opt(16, 0, 0).unwrap());
@@ -124,4 +124,3 @@ mod rand {
         }
     }
 }
-

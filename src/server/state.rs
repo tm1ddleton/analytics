@@ -37,7 +37,7 @@ impl AppState {
 }
 
 /// Replay session state
-/// 
+///
 /// Note: The actual DAG, push-mode engine, and replay engine are managed separately
 /// due to thread-safety requirements. This structure contains only the session metadata.
 pub struct ReplaySession {
@@ -89,4 +89,3 @@ pub struct AnalyticConfig {
     #[serde(default)]
     pub parameters: HashMap<String, String>,
 }
-

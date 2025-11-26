@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Asset key for uniquely identifying assets.
-/// 
+///
 /// Supports two key formats:
 /// - Equity keys: Simple string-based ticker symbols (e.g., "AAPL", "MSFT")
 /// - Futures keys: Composite key with series (underlying) and expiry date
@@ -20,13 +20,13 @@ pub enum AssetKey {
 
 impl AssetKey {
     /// Creates a new equity key from a ticker symbol.
-    /// 
+    ///
     /// # Arguments
     /// * `ticker` - The ticker symbol (e.g., "AAPL", "MSFT")
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(AssetKey::Equity(...))` if valid, or `Err` if invalid.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the ticker is empty or contains invalid characters.
     pub fn new_equity(ticker: impl Into<String>) -> Result<Self, AssetKeyError> {
@@ -36,14 +36,14 @@ impl AssetKey {
     }
 
     /// Creates a new futures key from a series and expiry date.
-    /// 
+    ///
     /// # Arguments
     /// * `series` - The underlying series identifier (e.g., "ES" for E-mini S&P 500)
     /// * `expiry_date` - The contract expiry date
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(AssetKey::Future { ... })` if valid, or `Err` if invalid.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the series is empty or contains invalid characters.
     pub fn new_future(
@@ -59,45 +59,54 @@ impl AssetKey {
     }
 
     /// Validates an equity key format.
-    /// 
+    ///
     /// Rejects empty strings and strings containing invalid characters.
     fn validate_equity_key(ticker: &str) -> Result<(), AssetKeyError> {
         if ticker.is_empty() {
             return Err(AssetKeyError::EmptyKey);
         }
-        
+
         // Check for invalid characters (allow alphanumeric, dots, hyphens, underscores)
-        if !ticker.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+        if !ticker
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
             return Err(AssetKeyError::InvalidCharacters);
         }
-        
+
         Ok(())
     }
 
     /// Validates a futures series key format.
-    /// 
+    ///
     /// Rejects empty strings and strings containing invalid characters.
     fn validate_futures_key(series: &str) -> Result<(), AssetKeyError> {
         if series.is_empty() {
             return Err(AssetKeyError::EmptyKey);
         }
-        
+
         // Check for invalid characters (allow alphanumeric, dots, hyphens, underscores)
-        if !series.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+        if !series
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
             return Err(AssetKeyError::InvalidCharacters);
         }
-        
+
         Ok(())
     }
 
     /// Returns the string representation of the key for lookup purposes.
-    /// 
+    ///
     /// For equities, returns the ticker symbol.
     /// For futures, returns a formatted string combining series and expiry.
     pub fn as_string(&self) -> String {
         match self {
             AssetKey::Equity(ticker) => ticker.clone(),
-            AssetKey::Future { series, expiry_date } => {
+            AssetKey::Future {
+                series,
+                expiry_date,
+            } => {
                 format!("{}-{}", series, expiry_date.format("%Y-%m-%d"))
             }
         }
@@ -108,7 +117,10 @@ impl fmt::Display for AssetKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AssetKey::Equity(ticker) => write!(f, "{}", ticker),
-            AssetKey::Future { series, expiry_date } => {
+            AssetKey::Future {
+                series,
+                expiry_date,
+            } => {
                 write!(f, "{}-{}", series, expiry_date.format("%Y-%m-%d"))
             }
         }
@@ -177,7 +189,11 @@ mod tests {
         let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
         let key = AssetKey::new_future("ES", expiry).unwrap();
         assert!(matches!(key, AssetKey::Future { .. }));
-        if let AssetKey::Future { series, expiry_date } = key {
+        if let AssetKey::Future {
+            series,
+            expiry_date,
+        } = key
+        {
             assert_eq!(series, "ES");
             assert_eq!(expiry_date, expiry);
         }
@@ -228,4 +244,3 @@ mod tests {
         assert_eq!(map.get(&key3), None);
     }
 }
-

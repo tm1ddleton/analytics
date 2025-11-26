@@ -15,7 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Port: {}", config.port);
     println!("   Database: {}", config.database_path);
     println!();
-    println!("Server will be available at: http://{}:{}", config.host, config.port);
+    println!(
+        "Server will be available at: http://{}:{}",
+        config.host, config.port
+    );
     println!();
     println!("Available endpoints:");
     println!("  GET  /health                    - Health check");
@@ -35,4 +38,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

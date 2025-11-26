@@ -17,7 +17,11 @@ pub struct AssetMetadata {
 
 impl AssetMetadata {
     /// Creates a new AssetMetadata instance.
-    pub fn new(name: impl Into<String>, exchange: impl Into<String>, currency: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        exchange: impl Into<String>,
+        currency: impl Into<String>,
+    ) -> Self {
         AssetMetadata {
             name: name.into(),
             exchange: exchange.into(),
@@ -57,14 +61,14 @@ pub struct Equity {
 
 impl Equity {
     /// Creates a new Equity asset.
-    /// 
+    ///
     /// # Arguments
     /// * `ticker` - The ticker symbol (e.g., "AAPL")
     /// * `name` - The company name
     /// * `exchange` - The exchange where it's traded
     /// * `currency` - The currency code
     /// * `sector` - The sector classification
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Equity)` if the ticker is valid, or `Err` if invalid.
     pub fn new(
@@ -84,7 +88,7 @@ impl Equity {
     }
 
     /// Creates a new Equity asset with corporate actions.
-    /// 
+    ///
     /// # Arguments
     /// * `ticker` - The ticker symbol
     /// * `name` - The company name
@@ -92,7 +96,7 @@ impl Equity {
     /// * `currency` - The currency code
     /// * `sector` - The sector classification
     /// * `corporate_actions` - Vector of corporate actions
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Equity)` if the ticker is valid, or `Err` if invalid.
     pub fn with_corporate_actions(
@@ -138,14 +142,14 @@ impl Equity {
     }
 
     /// Queries time-series data for this equity from a data provider.
-    /// 
+    ///
     /// # Arguments
     /// * `provider` - The data provider to query from (not stored in the asset)
     /// * `date_range` - The date range to query
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Vec<TimeSeriesPoint>)` if successful, or an error if the query fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the asset is not found in the data provider or if the query fails.
     pub fn get_time_series(
@@ -157,14 +161,14 @@ impl Equity {
     }
 
     /// Applies corporate actions to a price data point.
-    /// 
+    ///
     /// This is a rudimentary implementation for POC that adjusts prices
     /// based on corporate actions that occurred before or on the given date.
-    /// 
+    ///
     /// # Arguments
     /// * `price` - The original price
     /// * `date` - The date of the price point
-    /// 
+    ///
     /// # Returns
     /// Returns the adjusted price after applying relevant corporate actions.
     pub fn apply_corporate_actions(&self, price: f64, date: NaiveDate) -> f64 {
@@ -172,7 +176,11 @@ impl Equity {
 
         // Apply splits (price adjustment)
         for action in &self.corporate_actions {
-            if let CorporateAction::Split { ratio, effective_date } = action {
+            if let CorporateAction::Split {
+                ratio,
+                effective_date,
+            } = action
+            {
                 if date >= *effective_date {
                     // Adjust price for split (divide by ratio)
                     adjusted_price = adjusted_price / ratio;
@@ -184,20 +192,21 @@ impl Equity {
     }
 
     /// Applies corporate actions to a vector of time-series points.
-    /// 
+    ///
     /// # Arguments
     /// * `points` - Vector of time-series points to adjust
-    /// 
+    ///
     /// # Returns
     /// Returns a new vector with adjusted prices.
-    pub fn apply_corporate_actions_to_series(&self, points: Vec<TimeSeriesPoint>) -> Vec<TimeSeriesPoint> {
+    pub fn apply_corporate_actions_to_series(
+        &self,
+        points: Vec<TimeSeriesPoint>,
+    ) -> Vec<TimeSeriesPoint> {
         points
             .into_iter()
             .map(|point| {
-                let adjusted_price = self.apply_corporate_actions(
-                    point.close_price,
-                    point.timestamp.date_naive(),
-                );
+                let adjusted_price =
+                    self.apply_corporate_actions(point.close_price, point.timestamp.date_naive());
                 TimeSeriesPoint::new(point.timestamp, adjusted_price)
             })
             .collect()
@@ -221,13 +230,7 @@ mod tests {
 
     #[test]
     fn test_equity_creation_with_metadata() {
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         assert_eq!(equity.name(), "Apple Inc.");
         assert_eq!(equity.exchange(), "NASDAQ");
@@ -255,7 +258,8 @@ mod tests {
             "USD",
             "Technology",
             vec![split.clone(), dividend.clone()],
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(equity.corporate_actions().len(), 2);
         assert_eq!(equity.corporate_actions()[0], split);
@@ -264,13 +268,7 @@ mod tests {
 
     #[test]
     fn test_equity_immutability() {
-        let equity1 = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity1 = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         let equity2 = equity1.clone();
         assert_eq!(equity1, equity2);
@@ -284,20 +282,15 @@ mod tests {
             "NASDAQ",
             "USD",
             "Technology",
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(equity.asset_type(), AssetType::Equity);
     }
 
     #[test]
     fn test_equity_metadata_field_access() {
-        let equity = Equity::new(
-            "GOOGL",
-            "Alphabet Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("GOOGL", "Alphabet Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         assert_eq!(equity.name(), "Alphabet Inc.");
         assert_eq!(equity.exchange(), "NASDAQ");
@@ -307,39 +300,21 @@ mod tests {
 
     #[test]
     fn test_equity_invalid_ticker() {
-        let result = Equity::new(
-            "",
-            "Invalid Corp",
-            "NYSE",
-            "USD",
-            "Finance",
-        );
+        let result = Equity::new("", "Invalid Corp", "NYSE", "USD", "Finance");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_equity_query_time_series() {
-        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use crate::time_series::{DateRange, InMemoryDataProvider};
         use chrono::{TimeZone, Utc};
 
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         let mut provider = InMemoryDataProvider::new();
         let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                150.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
-                151.0,
-            ),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 150.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 151.0),
         ];
         provider.add_data(equity.key().clone(), points);
 
@@ -355,13 +330,7 @@ mod tests {
 
     #[test]
     fn test_equity_serialize_deserialize() {
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         let json = serde_json::to_string(&equity).unwrap();
         let deserialized: Equity = serde_json::from_str(&json).unwrap();
@@ -386,14 +355,17 @@ mod tests {
             "USD",
             "Technology",
             vec![split],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Price before split should be unchanged
-        let price_before = equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 8, 30).unwrap());
+        let price_before =
+            equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 8, 30).unwrap());
         assert_eq!(price_before, 200.0);
 
         // Price after split should be adjusted (divided by ratio)
-        let price_after = equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 9, 1).unwrap());
+        let price_after =
+            equity.apply_corporate_actions(200.0, NaiveDate::from_ymd_opt(2020, 9, 1).unwrap());
         assert_eq!(price_after, 100.0);
     }
 
@@ -413,7 +385,8 @@ mod tests {
             "USD",
             "Technology",
             vec![split],
-        ).unwrap();
+        )
+        .unwrap();
 
         let points = vec![
             TimeSeriesPoint::new(
@@ -436,4 +409,3 @@ mod tests {
         assert_eq!(adjusted[2].close_price, 100.0); // After split
     }
 }
-

@@ -12,21 +12,23 @@
 8. [x] Pull-Mode Analytics Engine — Implement time-series generation system that computes complete historical analytics on-demand for specified date ranges `L`
 9. [x] REST API Server with WebSocket/SSE — Build HTTP server with REST endpoints for querying analytics and WebSocket or Server-Sent Events for real-time push updates to UI `M`
 10. [x] React UI Dashboard — Create React frontend that connects to REST API, displays real-time analytics updates via WebSocket/SSE, shows asset data visualization, and includes controls for replay speed and asset selection `L`
+11. [ ] Code Refactoring & Cleanup — Clean up technical debt from rapid POC development including consolidating DAG node types, improving error handling, optimizing the push-mode/pull-mode integration, and adding comprehensive documentation `M`
 
 ## Post-POC Development
 
-11. [ ] Embedded Rust API — Design and implement clean, ergonomic Rust API for using the engine directly in Rust applications with comprehensive documentation `M`
-12. [ ] Python PyO3 Bindings — Create Python bindings using PyO3 that expose core Rust API functions, asset management, and analytics computation to Python `L`
-13. [ ] Polars Dataframe Integration — Implement conversion layer that exports analytics results as Polars dataframes in Python bindings and REST API responses `S`
-14. [ ] Python REST Client — Create Python client library that wraps REST API calls and returns Polars dataframes, providing alternative to PyO3 for distributed access `S`
-15. [ ] Real-Time Data Ingestion — Implement streaming data input system that accepts live market data updates and triggers push-mode analytics computation `M`
-16. [ ] Strategy Output System — Build mechanism for strategies to subscribe to analytics updates and receive real-time notifications when outputs change `M`
-17. [ ] Distributed Architecture Foundation — Design and implement distributed computation capabilities with node coordination, data partitioning, and result aggregation `XL`
-18. [ ] Performance Optimization — Optimize computation engine for high-throughput scenarios including parallel DAG execution, caching, and memory management `L`
-19. [ ] Comprehensive Testing Suite — Create unit tests, integration tests, and performance benchmarks covering all access modes and computation patterns `M`
+12. [ ] Embedded Rust API — Design and implement clean, ergonomic Rust API for using the engine directly in Rust applications with comprehensive documentation `M`
+13. [ ] Python PyO3 Bindings — Create Python bindings using PyO3 that expose core Rust API functions, asset management, and analytics computation to Python `L`
+14. [ ] Polars Dataframe Integration — Implement conversion layer that exports analytics results as Polars dataframes in Python bindings and REST API responses `S`
+15. [ ] Python REST Client — Create Python client library that wraps REST API calls and returns Polars dataframes, providing alternative to PyO3 for distributed access `S`
+16. [ ] Real-Time Data Ingestion — Implement streaming data input system that accepts live market data updates and triggers push-mode analytics computation `M`
+17. [ ] Strategy Output System — Build mechanism for strategies to subscribe to analytics updates and receive real-time notifications when outputs change `M`
+18. [ ] Distributed Architecture Foundation — Design and implement distributed computation capabilities with node coordination, data partitioning, and result aggregation `XL`
+19. [ ] Performance Optimization — Optimize computation engine for high-throughput scenarios including parallel DAG execution, caching, and memory management `L`
+20. [ ] Comprehensive Testing Suite — Create unit tests, integration tests, and performance benchmarks covering all access modes and computation patterns `M`
 
 > Notes
 > - POC Phase (1-10) focuses on demonstrating both push-mode and pull-mode analytics with high-speed replay in a React UI
+> - Item 11 is refactoring/cleanup to address technical debt from rapid POC development before proceeding to production features
 > - Order items by technical dependencies and product architecture
 > - Each item should represent an end-to-end (library + API + integration) functional and testable feature
 > - POC uses SQLite for simplicity; production will require more sophisticated storage

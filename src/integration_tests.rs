@@ -4,7 +4,7 @@
 mod integration_tests {
     use crate::asset::{Asset, AssetType};
     use crate::asset_key::AssetKey;
-    use crate::equity::{Equity, CorporateAction};
+    use crate::equity::{CorporateAction, Equity};
     use crate::future::Future;
     use crate::time_series::{DataProvider, DateRange, InMemoryDataProvider, TimeSeriesPoint};
     use chrono::{NaiveDate, TimeZone, Utc};
@@ -24,7 +24,8 @@ mod integration_tests {
             "USD",
             "Technology",
             vec![split],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Set up data provider with time-series data
         let mut provider = InMemoryDataProvider::new();
@@ -70,7 +71,8 @@ mod integration_tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let expiry2 = NaiveDate::from_ymd_opt(2025, 3, 20).unwrap();
         let contract2 = Future::new(
@@ -82,7 +84,8 @@ mod integration_tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Set up data provider
         let mut provider = InMemoryDataProvider::new();
@@ -101,12 +104,10 @@ mod integration_tests {
         provider.add_data(contract1.key().clone(), points1);
 
         // Add data for contract2 (after rollover)
-        let points2 = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 12, 16, 16, 0, 0).unwrap(),
-                4520.0,
-            ),
-        ];
+        let points2 = vec![TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 12, 16, 16, 0, 0).unwrap(),
+            4520.0,
+        )];
         provider.add_data(contract2.key().clone(), points2);
 
         // Generate rolling series
@@ -116,12 +117,8 @@ mod integration_tests {
             NaiveDate::from_ymd_opt(2024, 12, 16).unwrap(),
         );
 
-        let rolling_series = Future::generate_rolling_price_series(
-            &provider,
-            &contracts,
-            &date_range,
-            5,
-        ).unwrap();
+        let rolling_series =
+            Future::generate_rolling_price_series(&provider, &contracts, &date_range, 5).unwrap();
 
         // Verify rolling series contains data from both contracts
         assert!(rolling_series.len() >= 2);
@@ -130,13 +127,7 @@ mod integration_tests {
     /// Test Asset trait polymorphism - using different asset types through common interface
     #[test]
     fn test_asset_trait_polymorphism() {
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
         let future = Future::new(
@@ -148,7 +139,8 @@ mod integration_tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Use Asset trait methods on both types
         let assets: Vec<&dyn Asset> = vec![&equity, &future];
@@ -189,15 +181,15 @@ mod integration_tests {
 
         let mut provider = InMemoryDataProvider::new();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
-        let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                150.0,
-            ),
-        ];
+        let points = vec![TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
+            150.0,
+        )];
         provider.add_data(asset_key.clone(), points);
 
-        let result = provider.get_time_series(&asset_key, &single_day_range).unwrap();
+        let result = provider
+            .get_time_series(&asset_key, &single_day_range)
+            .unwrap();
         assert_eq!(result.len(), 1);
     }
 
@@ -220,18 +212,22 @@ mod integration_tests {
             "USD",
             "Technology",
             vec![split1, split2],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Price before first split
-        let price1 = equity.apply_corporate_actions(600.0, NaiveDate::from_ymd_opt(2020, 8, 30).unwrap());
+        let price1 =
+            equity.apply_corporate_actions(600.0, NaiveDate::from_ymd_opt(2020, 8, 30).unwrap());
         assert_eq!(price1, 600.0);
 
         // Price after first split, before second
-        let price2 = equity.apply_corporate_actions(300.0, NaiveDate::from_ymd_opt(2024, 6, 8).unwrap());
+        let price2 =
+            equity.apply_corporate_actions(300.0, NaiveDate::from_ymd_opt(2024, 6, 8).unwrap());
         assert_eq!(price2, 150.0); // 300 / 2
 
         // Price after both splits
-        let price3 = equity.apply_corporate_actions(300.0, NaiveDate::from_ymd_opt(2024, 6, 10).unwrap());
+        let price3 =
+            equity.apply_corporate_actions(300.0, NaiveDate::from_ymd_opt(2024, 6, 10).unwrap());
         assert_eq!(price3, 50.0); // 300 / 2 / 3
     }
 
@@ -248,7 +244,8 @@ mod integration_tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let provider = InMemoryDataProvider::new(); // Empty provider
         let contracts = vec![&contract];
@@ -258,12 +255,7 @@ mod integration_tests {
         );
 
         // Should handle missing data gracefully
-        let result = Future::generate_rolling_price_series(
-            &provider,
-            &contracts,
-            &date_range,
-            5,
-        );
+        let result = Future::generate_rolling_price_series(&provider, &contracts, &date_range, 5);
         // Result may be empty but should not panic
         assert!(result.is_ok());
     }
@@ -271,13 +263,7 @@ mod integration_tests {
     /// Test asset metadata access patterns
     #[test]
     fn test_asset_metadata_access_patterns() {
-        let equity = Equity::new(
-            "AAPL",
-            "Apple Inc.",
-            "NASDAQ",
-            "USD",
-            "Technology",
-        ).unwrap();
+        let equity = Equity::new("AAPL", "Apple Inc.", "NASDAQ", "USD", "Technology").unwrap();
 
         // Verify all metadata fields are accessible
         assert_eq!(equity.name(), "Apple Inc.");
@@ -295,7 +281,8 @@ mod integration_tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(future.name(), "E-mini S&P 500");
         assert_eq!(future.exchange(), "CME");
@@ -312,23 +299,15 @@ mod integration_tests {
             "NASDAQ",
             "USD",
             "Technology",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Set up data provider
         let mut provider = InMemoryDataProvider::new();
         let points = vec![
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(),
-                400.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(),
-                401.0,
-            ),
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(),
-                402.0,
-            ),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 15, 16, 0, 0).unwrap(), 400.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 16, 16, 0, 0).unwrap(), 401.0),
+            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 17, 16, 0, 0).unwrap(), 402.0),
         ];
         provider.add_data(equity.key().clone(), points);
 
@@ -359,4 +338,3 @@ mod integration_tests {
         assert!(matches!(key3, AssetKey::Equity(_)));
     }
 }
-

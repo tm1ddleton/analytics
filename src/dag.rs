@@ -1,17 +1,19 @@
 //! DAG Computation Framework
-//! 
+//!
 //! This module provides a DAG (Directed Acyclic Graph) construction and execution engine
 //! for wiring analytics dependencies explicitly with cycle detection, topological sorting,
 //! and parallel execution support.
 
-use crate::asset_key::AssetKey;
-use crate::time_series::{TimeSeriesPoint, DataProvider, DataProviderError, DateRange};
 use crate::analytics::{calculate_returns, calculate_volatility};
-use daggy::{Dag, NodeIndex, EdgeIndex, WouldCycle, Walker, petgraph::Direction};
+use crate::asset_key::AssetKey;
+use crate::time_series::{DataProvider, DataProviderError, DateRange, TimeSeriesPoint};
+use daggy::{petgraph::Direction, Dag, EdgeIndex, NodeIndex, Walker, WouldCycle};
+use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 
 /// Error types for DAG operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,56 @@ pub enum DagError {
     ExecutionError(String),
     /// Data provider error
     DataProviderError(String),
+}
+
+#[cfg(test)]
+mod node_key_tests {
+    use super::*;
+    use crate::asset_key::AssetKey;
+    use chrono::NaiveDate;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hash;
+
+    fn hash_key(key: &NodeKey) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn identical_node_keys_have_equal_hash() {
+        let asset = AssetKey::new_equity("AAPL").unwrap();
+        let range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
+        );
+        let key = NodeKey {
+            analytic: AnalyticType::Returns,
+            assets: vec![asset.clone()],
+            range: Some(range),
+            window: None,
+            override_tag: None,
+            params: HashMap::new(),
+        };
+        let key_clone = key.clone();
+        assert_eq!(hash_key(&key), hash_key(&key_clone));
+    }
+
+    #[test]
+    fn override_tag_mutates_hash() {
+        let asset = AssetKey::new_equity("AAPL").unwrap();
+        let base_key = NodeKey {
+            analytic: AnalyticType::Returns,
+            assets: vec![asset.clone()],
+            range: None,
+            window: None,
+            override_tag: None,
+            params: HashMap::new(),
+        };
+        let mut other = base_key.clone();
+        other.override_tag = Some("arith".to_string());
+        assert_ne!(hash_key(&base_key), hash_key(&other));
+    }
 }
 
 impl std::fmt::Display for DagError {
@@ -62,6 +114,119 @@ pub enum NodeParams {
     Map(HashMap<String, String>),
     /// Empty parameters
     None,
+}
+
+/// Analytic types supported by DAG nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnalyticType {
+    DataProvider,
+    Returns,
+    Volatility,
+    StdDev,
+    ExponentialMovingAverage,
+}
+
+impl AnalyticType {
+    pub fn from_str(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "returns" => AnalyticType::Returns,
+            "volatility" => AnalyticType::Volatility,
+            "std_dev" | "stddev" => AnalyticType::StdDev,
+            "ema" | "exponentialmovingaverage" => AnalyticType::ExponentialMovingAverage,
+            _ => AnalyticType::DataProvider,
+        }
+    }
+}
+
+impl std::fmt::Display for AnalyticType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let repr = match self {
+            AnalyticType::DataProvider => "data_provider",
+            AnalyticType::Returns => "returns",
+            AnalyticType::Volatility => "volatility",
+            AnalyticType::StdDev => "std_dev",
+            AnalyticType::ExponentialMovingAverage => "ema",
+        };
+        write!(f, "{repr}")
+    }
+}
+
+/// Windowing strategies describing lookback behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum WindowKind {
+    Fixed {
+        size: usize,
+    },
+    Exponential {
+        lambda: OrderedFloat<f64>,
+        lookback: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowSpec {
+    pub kind: WindowKind,
+}
+
+impl WindowSpec {
+    pub fn burn_in(&self) -> usize {
+        match self.kind {
+            WindowKind::Fixed { size } => size,
+            WindowKind::Exponential { lookback, .. } => lookback,
+        }
+    }
+}
+
+/// Node metadata key for deduplication and caching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeKey {
+    pub analytic: AnalyticType,
+    pub assets: Vec<AssetKey>,
+    pub range: Option<DateRange>,
+    pub window: Option<WindowSpec>,
+    pub override_tag: Option<String>,
+    pub params: HashMap<String, String>,
+}
+
+impl NodeKey {
+    pub fn params_map(&self) -> HashMap<String, String> {
+        let mut map = self.params.clone();
+        map.insert("analytic_type".to_string(), self.analytic.to_string());
+        if let Some(tag) = &self.override_tag {
+            map.insert("override".to_string(), tag.clone());
+        }
+        if let Some(window) = &self.window {
+            match window.kind {
+                WindowKind::Fixed { size } => {
+                    map.insert("window_size".to_string(), size.to_string());
+                }
+                WindowKind::Exponential { lambda, lookback } => {
+                    map.insert("ema_lambda".to_string(), lambda.to_string());
+                    map.insert("ema_lookback".to_string(), lookback.to_string());
+                }
+            }
+        }
+        map
+    }
+}
+
+impl Hash for NodeKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.analytic.hash(state);
+        self.assets.hash(state);
+        if let Some(range) = &self.range {
+            range.start.hash(state);
+            range.end.hash(state);
+        }
+        self.window.hash(state);
+        self.override_tag.hash(state);
+        let mut pairs: Vec<_> = self.params.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in pairs {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
 }
 
 /// Execution result for a node (can be collection of time series)
@@ -106,7 +271,7 @@ impl Node {
 }
 
 /// Execution cache for intermediate results during pull-mode execution
-/// 
+///
 /// Stores node outputs to avoid re-computation when a parent's result is needed by multiple children
 #[derive(Debug)]
 struct ExecutionCache {
@@ -124,22 +289,27 @@ impl ExecutionCache {
             extended_ranges: HashMap::new(),
         }
     }
-    
+
     /// Gets cached output for a node
     fn get(&self, node_id: NodeId) -> Option<&Vec<TimeSeriesPoint>> {
         self.outputs.get(&node_id)
     }
-    
+
     /// Inserts output for a node
     fn insert(&mut self, node_id: NodeId, output: Vec<TimeSeriesPoint>, range: DateRange) {
         self.outputs.insert(node_id, output);
         self.extended_ranges.insert(node_id, range);
     }
-    
+
     /// Extracts output filtered to a specific date range
-    fn extract_range(&self, node_id: NodeId, target_range: &DateRange) -> Option<Vec<TimeSeriesPoint>> {
+    fn extract_range(
+        &self,
+        node_id: NodeId,
+        target_range: &DateRange,
+    ) -> Option<Vec<TimeSeriesPoint>> {
         self.outputs.get(&node_id).map(|output| {
-            output.iter()
+            output
+                .iter()
                 .filter(|point| {
                     let date = point.timestamp.date_naive();
                     date >= target_range.start && date <= target_range.end
@@ -148,7 +318,7 @@ impl ExecutionCache {
                 .collect()
         })
     }
-    
+
     /// Clears all cached data
     fn clear(&mut self) {
         self.outputs.clear();
@@ -157,7 +327,7 @@ impl ExecutionCache {
 }
 
 /// DAG for analytics dependencies
-/// 
+///
 /// Single DAG instance handles multiple assets (one DAG for all assets)
 #[derive(Debug)]
 pub struct AnalyticsDag {
@@ -186,12 +356,12 @@ impl AnalyticsDag {
     }
 
     /// Adds a new node to the DAG
-    /// 
+    ///
     /// # Arguments
     /// * `node_type` - Type of the node (e.g., "moving_average")
     /// * `params` - Parameters for the node
     /// * `assets` - Assets this node operates on
-    /// 
+    ///
     /// # Returns
     /// Returns the NodeId of the newly created node
     pub fn add_node(
@@ -205,28 +375,32 @@ impl AnalyticsDag {
 
         let node = Node::new(node_id, node_type, params, assets);
         let index = self.dag.add_node(node);
-        
+
         self.node_id_to_index.insert(node_id, index);
         self.index_to_node_id.insert(index, node_id);
-        
+
         // Invalidate cache when DAG structure changes
         self.cached_toposort = None;
-        
+
         node_id
     }
 
     /// Adds an edge (dependency) between two nodes
-    /// 
+    ///
     /// # Arguments
     /// * `from` - Source node ID
     /// * `to` - Target node ID
-    /// 
+    ///
     /// # Returns
     /// Returns Ok(EdgeIndex) if successful, or Err(DagError) if cycle would be created
     pub fn add_edge(&mut self, from: NodeId, to: NodeId) -> Result<EdgeIndex, DagError> {
-        let from_index = self.node_id_to_index.get(&from)
+        let from_index = self
+            .node_id_to_index
+            .get(&from)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {:?} not found", from)))?;
-        let to_index = self.node_id_to_index.get(&to)
+        let to_index = self
+            .node_id_to_index
+            .get(&to)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {:?} not found", to)))?;
 
         match self.dag.add_edge(*from_index, *to_index, ()) {
@@ -235,9 +409,10 @@ impl AnalyticsDag {
                 self.cached_toposort = None;
                 Ok(edge_index)
             }
-            Err(_would_cycle) => Err(DagError::CycleDetected(
-                format!("Adding edge from {:?} to {:?} would create a cycle", from, to)
-            )),
+            Err(_would_cycle) => Err(DagError::CycleDetected(format!(
+                "Adding edge from {:?} to {:?} would create a cycle",
+                from, to
+            ))),
         }
     }
 
@@ -259,58 +434,61 @@ impl AnalyticsDag {
     }
 
     /// Removes a node from the DAG
-    /// 
+    ///
     /// Only nodes with no dependencies (no child nodes) can be removed.
-    /// 
+    ///
     /// # Arguments
     /// * `node_id` - ID of the node to remove
-    /// 
+    ///
     /// # Returns
     /// Returns Ok(()) if successful, or Err if node has dependencies or doesn't exist
     pub fn remove_node(&mut self, node_id: NodeId) -> Result<(), DagError> {
         // Check if node exists
-        let node_index = self.node_id_to_index.get(&node_id)
+        let node_index = self
+            .node_id_to_index
+            .get(&node_id)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {:?} not found", node_id)))?;
-        
+
         // Check if node has any children (dependencies)
-        let has_children = self.dag
+        let has_children = self
+            .dag
             .children(*node_index)
             .iter(&self.dag)
             .next()
             .is_some();
-        
+
         if has_children {
-            return Err(DagError::InvalidOperation(
-                format!("Cannot remove node {:?}: node has dependencies", node_id)
-            ));
+            return Err(DagError::InvalidOperation(format!(
+                "Cannot remove node {:?}: node has dependencies",
+                node_id
+            )));
         }
-        
+
         // Remove the node - daggy returns the removed node weight
         let node_index_copy = *node_index;
-        let _removed_node = self.dag.remove_node(node_index_copy)
-            .ok_or_else(|| DagError::InvalidOperation(
-                format!("Failed to remove node {:?}", node_id)
-            ))?;
-        
+        let _removed_node = self.dag.remove_node(node_index_copy).ok_or_else(|| {
+            DagError::InvalidOperation(format!("Failed to remove node {:?}", node_id))
+        })?;
+
         // After removal, daggy may have shifted indices. We need to rebuild our mappings.
         // Collect all current nodes and their indices
         let mut new_node_id_to_index = HashMap::new();
         let mut new_index_to_node_id = HashMap::new();
-        
+
         for idx in self.dag.graph().node_indices() {
             if let Some(node) = self.dag.node_weight(idx) {
                 new_node_id_to_index.insert(node.id, idx);
                 new_index_to_node_id.insert(idx, node.id);
             }
         }
-        
+
         // Update mappings
         self.node_id_to_index = new_node_id_to_index;
         self.index_to_node_id = new_index_to_node_id;
-        
+
         // Invalidate cache when DAG structure changes
         self.cached_toposort = None;
-        
+
         Ok(())
     }
 
@@ -328,9 +506,9 @@ impl AnalyticsDag {
     }
 
     /// Computes topological sort of the DAG using Kahn's algorithm
-    /// 
+    ///
     /// Returns nodes in topological order (dependencies before dependents)
-    /// 
+    ///
     /// # Returns
     /// Returns Ok(Vec<NodeId>) with nodes in topological order, or Err if DAG is invalid
     fn compute_toposort(&self) -> Result<Vec<NodeId>, DagError> {
@@ -382,7 +560,7 @@ impl AnalyticsDag {
         // Check if all nodes were processed (detects cycles, though daggy prevents them)
         if result.len() != self.dag.node_count() {
             return Err(DagError::InvalidOperation(
-                "Topological sort failed - DAG may contain cycles".to_string()
+                "Topological sort failed - DAG may contain cycles".to_string(),
             ));
         }
 
@@ -390,14 +568,14 @@ impl AnalyticsDag {
     }
 
     /// Gets the execution order (topological sort) of nodes
-    /// 
+    ///
     /// Supports querying execution order without executing nodes.
     /// Results are cached and invalidated when DAG structure changes.
-    /// 
+    ///
     /// # Returns
     /// Returns execution sequence as vector of node identifiers in topological order,
     /// or error if DAG is invalid
-    /// 
+    ///
     /// # Errors
     /// Returns `DagError::InvalidOperation` if DAG structure is invalid
     pub fn execution_order(&mut self) -> Result<Vec<NodeId>, DagError> {
@@ -408,15 +586,15 @@ impl AnalyticsDag {
 
         // Compute topological sort
         let sorted = self.compute_toposort()?;
-        
+
         // Cache the result
         self.cached_toposort = Some(sorted.clone());
-        
+
         Ok(sorted)
     }
 
     /// Gets the execution order without mutating (doesn't cache)
-    /// 
+    ///
     /// Useful for read-only access to execution order
     pub fn execution_order_immutable(&self) -> Result<Vec<NodeId>, DagError> {
         if self.dag.node_count() == 0 {
@@ -435,7 +613,11 @@ impl AnalyticsDag {
 
         // Count in-degrees using graph() to access petgraph API
         for node_idx in self.dag.graph().node_indices() {
-            for neighbor_idx in self.dag.graph().neighbors_directed(node_idx, Direction::Outgoing) {
+            for neighbor_idx in self
+                .dag
+                .graph()
+                .neighbors_directed(node_idx, Direction::Outgoing)
+            {
                 *in_degree.entry(neighbor_idx).or_insert(0) += 1;
             }
         }
@@ -453,7 +635,11 @@ impl AnalyticsDag {
                 result.push(node_id);
             }
 
-            for neighbor_idx in self.dag.graph().neighbors_directed(node_index, Direction::Outgoing) {
+            for neighbor_idx in self
+                .dag
+                .graph()
+                .neighbors_directed(node_index, Direction::Outgoing)
+            {
                 if let Some(degree) = in_degree.get_mut(&neighbor_idx) {
                     *degree -= 1;
                     if *degree == 0 {
@@ -465,7 +651,7 @@ impl AnalyticsDag {
 
         if result.len() != self.dag.node_count() {
             return Err(DagError::InvalidOperation(
-                "Topological sort failed - DAG may contain cycles".to_string()
+                "Topological sort failed - DAG may contain cycles".to_string(),
             ));
         }
 
@@ -473,13 +659,13 @@ impl AnalyticsDag {
     }
 
     /// Executes the DAG with provided computation functions
-    /// 
+    ///
     /// Uses topological sort to determine execution order and tokio for parallel execution.
     /// Independent nodes (no dependencies between them) execute in parallel.
-    /// 
+    ///
     /// # Arguments
     /// * `compute_fn` - Async function that takes (node, input_data) and returns output
-    /// 
+    ///
     /// # Returns
     /// Returns HashMap of NodeId -> NodeOutput with execution results
     pub async fn execute<F, Fut>(
@@ -492,61 +678,65 @@ impl AnalyticsDag {
     {
         // Get execution order
         let execution_order = self.execution_order()?;
-        
+
         // Results storage (thread-safe for parallel execution)
         let results = Arc::new(RwLock::new(HashMap::new()));
-        
+
         // Track which level of the DAG we're at (for parallel execution)
         let mut current_level = Vec::new();
         let mut remaining_nodes: Vec<NodeId> = execution_order.clone();
-        
+
         while !remaining_nodes.is_empty() {
             // Find all nodes at current level (no dependencies on remaining nodes)
             current_level.clear();
             let mut next_remaining = Vec::new();
-            
+
             for &node_id in &remaining_nodes {
                 let node_index = self.node_id_to_index.get(&node_id).unwrap();
-                
+
                 // Check if all dependencies have been computed
-                let parents: Vec<NodeId> = self.dag
+                let parents: Vec<NodeId> = self
+                    .dag
                     .parents(*node_index)
                     .iter(&self.dag)
                     .filter_map(|(_, parent_idx)| self.index_to_node_id.get(&parent_idx).copied())
                     .collect();
-                
+
                 let all_deps_ready = {
                     let results_guard = results.read().await;
-                    parents.iter().all(|parent_id| results_guard.contains_key(parent_id))
+                    parents
+                        .iter()
+                        .all(|parent_id| results_guard.contains_key(parent_id))
                 };
-                
+
                 if all_deps_ready {
                     current_level.push(node_id);
                 } else {
                     next_remaining.push(node_id);
                 }
             }
-            
+
             if current_level.is_empty() {
                 return Err(DagError::ExecutionError(
-                    "No nodes ready to execute - possible circular dependency".to_string()
+                    "No nodes ready to execute - possible circular dependency".to_string(),
                 ));
             }
-            
+
             // Execute all nodes in current level in parallel
             let mut tasks = Vec::new();
-            
+
             for &node_id in &current_level {
                 let node = self.get_node(node_id).unwrap().clone();
                 let node_index = self.node_id_to_index.get(&node_id).unwrap();
-                
+
                 // Collect inputs from parent nodes
-                let parents: Vec<NodeId> = self.dag
+                let parents: Vec<NodeId> = self
+                    .dag
                     .parents(*node_index)
                     .iter(&self.dag)
                     .filter_map(|(_, parent_idx)| self.index_to_node_id.get(&parent_idx).copied())
                     .collect();
-                
+
                 let inputs = {
                     let results_guard = results.read().await;
                     parents
@@ -554,29 +744,29 @@ impl AnalyticsDag {
                         .filter_map(|parent_id| results_guard.get(parent_id).cloned())
                         .collect::<Vec<_>>()
                 };
-                
+
                 let compute_fn_clone = compute_fn.clone();
                 let results_clone = Arc::clone(&results);
-                
+
                 let task = tokio::spawn(async move {
                     let output = compute_fn_clone(node.clone(), inputs).await?;
                     let mut results_guard = results_clone.write().await;
                     results_guard.insert(node_id, output);
                     Ok::<_, DagError>(())
                 });
-                
+
                 tasks.push(task);
             }
-            
+
             // Wait for all parallel tasks to complete
             for task in tasks {
                 task.await
                     .map_err(|e| DagError::ExecutionError(format!("Task join error: {}", e)))??;
             }
-            
+
             remaining_nodes = next_remaining;
         }
-        
+
         // Extract results
         let final_results = results.read().await.clone();
         Ok(final_results)
@@ -594,9 +784,9 @@ impl AnalyticsDag {
             Vec::new()
         }
     }
-    
+
     /// Gets all node IDs in the DAG
-    /// 
+    ///
     /// # Returns
     /// Vector of all NodeId values
     pub fn node_ids(&self) -> Vec<NodeId> {
@@ -617,14 +807,14 @@ impl AnalyticsDag {
     }
 
     /// Executes nodes affected by a change (push-mode incremental update)
-    /// 
+    ///
     /// When new data arrives for a node, this method identifies and executes
     /// only the affected downstream nodes (dependencies) rather than the entire DAG.
-    /// 
+    ///
     /// # Arguments
     /// * `changed_node_id` - ID of the node that has new data
     /// * `compute_fn` - Async function to compute node outputs
-    /// 
+    ///
     /// # Returns
     /// Returns HashMap of NodeId -> NodeOutput for all affected nodes
     pub async fn execute_incremental<F, Fut>(
@@ -638,37 +828,38 @@ impl AnalyticsDag {
     {
         // Find all nodes affected by this change (descendants)
         let affected_nodes = self.get_descendants(changed_node_id);
-        
+
         if affected_nodes.is_empty() {
             // No downstream dependencies, return empty result
             return Ok(HashMap::new());
         }
-        
+
         // Get topological order for affected nodes only
         let full_order = self.execution_order()?;
         let affected_order: Vec<NodeId> = full_order
             .into_iter()
             .filter(|id| affected_nodes.contains(id))
             .collect();
-        
+
         // Execute only affected nodes (similar to execute() but with subset)
         let results = Arc::new(RwLock::new(HashMap::new()));
         let mut current_level = Vec::new();
         let mut remaining_nodes = affected_order;
-        
+
         while !remaining_nodes.is_empty() {
             current_level.clear();
             let mut next_remaining = Vec::new();
-            
+
             for &node_id in &remaining_nodes {
                 let node_index = self.node_id_to_index.get(&node_id).unwrap();
-                
-                let parents: Vec<NodeId> = self.dag
+
+                let parents: Vec<NodeId> = self
+                    .dag
                     .parents(*node_index)
                     .iter(&self.dag)
                     .filter_map(|(_, parent_idx)| self.index_to_node_id.get(&parent_idx).copied())
                     .collect();
-                
+
                 let all_deps_ready = {
                     let results_guard = results.read().await;
                     parents.iter().all(|parent_id| {
@@ -676,32 +867,33 @@ impl AnalyticsDag {
                         results_guard.contains_key(parent_id) || !affected_nodes.contains(parent_id)
                     })
                 };
-                
+
                 if all_deps_ready {
                     current_level.push(node_id);
                 } else {
                     next_remaining.push(node_id);
                 }
             }
-            
+
             if current_level.is_empty() {
                 return Err(DagError::ExecutionError(
-                    "No nodes ready to execute in incremental update".to_string()
+                    "No nodes ready to execute in incremental update".to_string(),
                 ));
             }
-            
+
             let mut tasks = Vec::new();
-            
+
             for &node_id in &current_level {
                 let node = self.get_node(node_id).unwrap().clone();
                 let node_index = self.node_id_to_index.get(&node_id).unwrap();
-                
-                let parents: Vec<NodeId> = self.dag
+
+                let parents: Vec<NodeId> = self
+                    .dag
                     .parents(*node_index)
                     .iter(&self.dag)
                     .filter_map(|(_, parent_idx)| self.index_to_node_id.get(&parent_idx).copied())
                     .collect();
-                
+
                 let inputs = {
                     let results_guard = results.read().await;
                     parents
@@ -709,62 +901,62 @@ impl AnalyticsDag {
                         .filter_map(|parent_id| results_guard.get(parent_id).cloned())
                         .collect::<Vec<_>>()
                 };
-                
+
                 let compute_fn_clone = compute_fn.clone();
                 let results_clone = Arc::clone(&results);
-                
+
                 let task = tokio::spawn(async move {
                     let output = compute_fn_clone(node.clone(), inputs).await?;
                     let mut results_guard = results_clone.write().await;
                     results_guard.insert(node_id, output);
                     Ok::<_, DagError>(())
                 });
-                
+
                 tasks.push(task);
             }
-            
+
             for task in tasks {
                 task.await
                     .map_err(|e| DagError::ExecutionError(format!("Task join error: {}", e)))??;
             }
-            
+
             remaining_nodes = next_remaining;
         }
-        
+
         let final_results = results.read().await.clone();
         Ok(final_results)
     }
 
     /// Gets all descendant nodes (downstream dependencies)
-    /// 
+    ///
     /// This is useful for push-mode updates where we need to know which nodes
     /// are affected by a change to a particular node.
     pub fn get_descendants(&self, node_id: NodeId) -> Vec<NodeId> {
         let mut descendants = Vec::new();
         let mut to_visit = vec![node_id];
         let mut visited = std::collections::HashSet::new();
-        
+
         while let Some(current) = to_visit.pop() {
             if !visited.insert(current) {
                 continue;
             }
-            
+
             if current != node_id {
                 descendants.push(current);
             }
-            
+
             let children = self.get_children(current);
             to_visit.extend(children);
         }
-        
+
         descendants
     }
 
     /// Registers a callback for node execution completion (push-mode hook)
-    /// 
+    ///
     /// This method is designed to support push-mode integration by allowing
     /// external systems to register callbacks that are invoked when nodes complete.
-    /// 
+    ///
     /// Note: This is a placeholder for the push-mode API design. The actual
     /// implementation would store callbacks and invoke them during execution.
     pub fn register_completion_callback<F>(&mut self, _node_id: NodeId, _callback: F)
@@ -777,10 +969,10 @@ impl AnalyticsDag {
     }
 
     /// Calculates the number of burn-in days needed for a node and its dependencies
-    /// 
+    ///
     /// This determines how many extra days of data to query before the user's requested range
     /// to ensure analytics have enough historical context.
-    /// 
+    ///
     /// # Examples
     /// - DataProvider: 0 days (no burn-in needed)
     /// - Returns: 1 day (needs 1 extra price to compute first return)
@@ -790,17 +982,18 @@ impl AnalyticsDag {
             Some(n) => n,
             None => return 0,
         };
-        
+
         // Handle DataProvider nodes
         if node.node_type == "DataProvider" || node.node_type.contains("DataProvider") {
             return 0;
         }
-        
+
         match node.node_type.as_str() {
             "Returns" => {
                 // Returns needs 1 extra day of prices
                 // Recursively get parent burn-in
-                let parent_burnin: usize = self.get_parents(node_id)
+                let parent_burnin: usize = self
+                    .get_parents(node_id)
                     .iter()
                     .map(|&parent_id| self.calculate_burnin_days(parent_id))
                     .max()
@@ -810,15 +1003,17 @@ impl AnalyticsDag {
             "Volatility" => {
                 // Volatility needs window_size extra returns
                 let window_size = if let NodeParams::Map(ref params) = node.params {
-                    params.get("window_size")
+                    params
+                        .get("window_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(10)
                 } else {
                     10
                 };
-                
+
                 // Recursively get parent burn-in
-                let parent_burnin: usize = self.get_parents(node_id)
+                let parent_burnin: usize = self
+                    .get_parents(node_id)
                     .iter()
                     .map(|&parent_id| self.calculate_burnin_days(parent_id))
                     .max()
@@ -866,16 +1061,16 @@ impl AnalyticsDag {
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut dag = AnalyticsDag::new();
     /// let aapl = AssetKey::new_equity("AAPL")?;
-    /// 
+    ///
     /// // Add nodes (DataProvider, Returns, Volatility)
     /// let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-    /// 
+    ///
     /// let provider = Arc::new(InMemoryDataProvider::new());
     /// let date_range = DateRange::new(
     ///     NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
     ///     NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
     /// );
-    /// 
+    ///
     /// // Execute in pull-mode for complete time series
     /// let results = dag.execute_pull_mode(data_node, date_range, &*provider)?;
     /// println!("Computed {} data points", results.len());
@@ -889,21 +1084,22 @@ impl AnalyticsDag {
         provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
         use chrono::Duration;
-        
+
         // Verify target node exists
-        let _target_node = self.get_node(node_id)
+        let _target_node = self
+            .get_node(node_id)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
-        
+
         // Calculate burn-in days needed for this node
         let burnin_days = self.calculate_burnin_days(node_id);
-        
+
         // Extend date range backward for burn-in
         let extended_start = date_range.start - Duration::days(burnin_days as i64);
         let extended_range = DateRange::new(extended_start, date_range.end);
-        
+
         // Get topological order to determine execution sequence
         let execution_order = self.execution_order_immutable()?;
-        
+
         // Find all ancestors of target node that need to be executed
         let mut nodes_to_execute = Vec::new();
         for &candidate_id in &execution_order {
@@ -913,25 +1109,23 @@ impl AnalyticsDag {
                 nodes_to_execute.push(candidate_id);
             }
         }
-        
+
         // Create execution cache for intermediate results
         let mut cache = ExecutionCache::new();
-        
+
         // Execute nodes in topological order with extended date range
         for &current_id in &nodes_to_execute {
-            let current_node = self.get_node(current_id)
-                .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", current_id.0)))?;
-            
+            let current_node = self.get_node(current_id).ok_or_else(|| {
+                DagError::NodeNotFound(format!("Node {} not found", current_id.0))
+            })?;
+
             // Get parent outputs from cache
             let parents = self.get_parents(current_id);
-            let parent_outputs: Vec<Vec<TimeSeriesPoint>> = parents.iter()
-                .map(|&parent_id| {
-                    cache.get(parent_id)
-                        .cloned()
-                        .unwrap_or_default()
-                })
+            let parent_outputs: Vec<Vec<TimeSeriesPoint>> = parents
+                .iter()
+                .map(|&parent_id| cache.get(parent_id).cloned().unwrap_or_default())
                 .collect();
-            
+
             // Execute the node based on its type (using extended range for data loading)
             let result = self.execute_node_pull_mode(
                 current_node,
@@ -939,17 +1133,16 @@ impl AnalyticsDag {
                 &extended_range,
                 provider,
             )?;
-            
+
             // Cache the result with its extended range
             cache.insert(current_id, result, extended_range.clone());
         }
-        
+
         // Extract result for target node, filtered to original requested range
-        let filtered_result = cache.extract_range(node_id, &date_range)
-            .ok_or_else(|| DagError::ExecutionError(
-                format!("No result found for node {}", node_id.0)
-            ))?;
-        
+        let filtered_result = cache.extract_range(node_id, &date_range).ok_or_else(|| {
+            DagError::ExecutionError(format!("No result found for node {}", node_id.0))
+        })?;
+
         Ok(filtered_result)
     }
 
@@ -980,24 +1173,24 @@ impl AnalyticsDag {
     /// let mut dag = AnalyticsDag::new();
     /// let aapl = AssetKey::new_equity("AAPL")?;
     /// let msft = AssetKey::new_equity("MSFT")?;
-    /// 
+    ///
     /// // Add nodes for two assets
     /// let aapl_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
     /// let msft_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![msft]);
-    /// 
+    ///
     /// let provider = InMemoryDataProvider::new();
     /// let date_range = DateRange::new(
     ///     NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
     ///     NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
     /// );
-    /// 
+    ///
     /// // Execute both nodes in parallel
     /// let results = dag.execute_pull_mode_parallel(
     ///     vec![aapl_node, msft_node],
     ///     date_range,
     ///     &provider,
     /// )?;
-    /// 
+    ///
     /// println!("AAPL: {} points", results.get(&aapl_node).unwrap().len());
     /// println!("MSFT: {} points", results.get(&msft_node).unwrap().len());
     /// # Ok(())
@@ -1010,11 +1203,11 @@ impl AnalyticsDag {
         provider: &(dyn DataProvider + Sync),
     ) -> Result<HashMap<NodeId, Vec<TimeSeriesPoint>>, DagError> {
         use std::sync::Mutex as StdMutex;
-        
+
         // Create a shared result map protected by mutex
         let results = StdMutex::new(HashMap::<NodeId, Vec<TimeSeriesPoint>>::new());
         let errors = StdMutex::new(Vec::<String>::new());
-        
+
         // Execute each node (sequentially for now, but designed for future parallelization)
         // Note: For true parallelism, we'd need thread-safe access to the DAG,
         // which would require wrapping it in Arc<RwLock<>> at the calling site.
@@ -1025,23 +1218,28 @@ impl AnalyticsDag {
                     results.lock().unwrap().insert(node_id, result);
                 }
                 Err(e) => {
-                    errors.lock().unwrap().push(format!("Node {}: {}", node_id.0, e));
+                    errors
+                        .lock()
+                        .unwrap()
+                        .push(format!("Node {}: {}", node_id.0, e));
                 }
             }
         }
-        
+
         // Check if any errors occurred
         let error_list = errors.lock().unwrap();
         if !error_list.is_empty() {
-            return Err(DagError::ExecutionError(
-                format!("Parallel execution had {} error(s): {}", error_list.len(), error_list.join("; "))
-            ));
+            return Err(DagError::ExecutionError(format!(
+                "Parallel execution had {} error(s): {}",
+                error_list.len(),
+                error_list.join("; ")
+            )));
         }
-        
+
         // Return results
         Ok(results.into_inner().unwrap())
     }
-    
+
     /// Helper function to execute a single node in pull-mode
     fn execute_node_pull_mode(
         &self,
@@ -1051,93 +1249,94 @@ impl AnalyticsDag {
         provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
         // Handle DataProvider nodes (both capitalized and lowercase for compatibility)
-        if node.node_type == "DataProvider" || node.node_type == "data_provider" 
-            || node.node_type.contains("DataProvider") || node.node_type.contains("data_provider") {
+        if node.node_type == "DataProvider"
+            || node.node_type == "data_provider"
+            || node.node_type.contains("DataProvider")
+            || node.node_type.contains("data_provider")
+        {
             if let Some(asset) = node.assets.first() {
                 let data = provider.get_time_series(asset, date_range)?;
                 return Ok(data);
             } else {
                 return Err(DagError::ExecutionError(
-                    "DataProvider node has no assets".to_string()
+                    "DataProvider node has no assets".to_string(),
                 ));
             }
         }
-        
+
         match node.node_type.as_str() {
             "Returns" | "returns" => {
                 // Calculate returns from parent data (prices)
                 if parent_outputs.is_empty() {
                     return Err(DagError::ExecutionError(
-                        "Returns node requires parent data".to_string()
+                        "Returns node requires parent data".to_string(),
                     ));
                 }
-                
+
                 let prices_data = &parent_outputs[0];
                 if prices_data.is_empty() {
                     return Ok(Vec::new());
                 }
-                
+
                 // Extract prices
-                let prices: Vec<f64> = prices_data.iter()
-                    .map(|p| p.close_price)
-                    .collect();
-                
+                let prices: Vec<f64> = prices_data.iter().map(|p| p.close_price).collect();
+
                 // Calculate returns (same length as prices, first element is NaN)
                 let returns = calculate_returns(&prices);
-                
+
                 // Convert back to TimeSeriesPoint
                 // Returns has same length as prices (first is NaN, converted to 0 by analytics function)
-                let result: Vec<TimeSeriesPoint> = prices_data.iter()
+                let result: Vec<TimeSeriesPoint> = prices_data
+                    .iter()
                     .zip(returns.iter())
                     .map(|(point, &ret)| TimeSeriesPoint::new(point.timestamp, ret))
                     .collect();
-                
+
                 Ok(result)
             }
             "Volatility" | "volatility" => {
                 // Calculate volatility from parent data (returns)
                 if parent_outputs.is_empty() {
                     return Err(DagError::ExecutionError(
-                        "Volatility node requires parent data".to_string()
+                        "Volatility node requires parent data".to_string(),
                     ));
                 }
-                
+
                 let returns_data = &parent_outputs[0];
                 if returns_data.is_empty() {
                     return Ok(Vec::new());
                 }
-                
+
                 // Extract window size from node params
                 let window_size = if let NodeParams::Map(ref params) = node.params {
-                    params.get("window_size")
+                    params
+                        .get("window_size")
                         .and_then(|s| s.parse::<usize>().ok())
                         .unwrap_or(10) // Default to 10
                 } else {
                     10 // Default window size
                 };
-                
+
                 // Extract returns
-                let returns: Vec<f64> = returns_data.iter()
-                    .map(|p| p.close_price)
-                    .collect();
-                
+                let returns: Vec<f64> = returns_data.iter().map(|p| p.close_price).collect();
+
                 // Calculate volatility (same length as returns)
                 let volatility = calculate_volatility(&returns, window_size);
-                
+
                 // Convert back to TimeSeriesPoint
                 // Volatility has same length as returns (early values are NaN until window is full)
-                let result: Vec<TimeSeriesPoint> = returns_data.iter()
+                let result: Vec<TimeSeriesPoint> = returns_data
+                    .iter()
                     .zip(volatility.iter())
                     .map(|(point, &vol)| TimeSeriesPoint::new(point.timestamp, vol))
                     .collect();
-                
+
                 Ok(result)
             }
-            _ => {
-                Err(DagError::ExecutionError(
-                    format!("Unsupported node type: {}", node.node_type)
-                ))
-            }
+            _ => Err(DagError::ExecutionError(format!(
+                "Unsupported node type: {}",
+                node.node_type
+            ))),
         }
     }
 }
@@ -1154,7 +1353,7 @@ mod tests {
     use crate::asset_key::AssetKey;
 
     /// Task Group 1.1: Write 2-8 focused tests for DAG library evaluation
-    /// 
+    ///
     /// These tests evaluate different DAG libraries to determine which one
     /// has the best API for DAG creation, cycle detection, dynamic modifications,
     /// and topological sorting.
@@ -1164,12 +1363,12 @@ mod tests {
         // Test basic DAG creation with petgraph
         // This will help evaluate API ergonomics for DAG creation
         use petgraph::graph::{DiGraph, NodeIndex};
-        
+
         let mut graph = DiGraph::<String, ()>::new();
         let node_a = graph.add_node("Node A".to_string());
         let node_b = graph.add_node("Node B".to_string());
         let _edge = graph.add_edge(node_a, node_b, ());
-        
+
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.edge_count(), 1);
     }
@@ -1179,7 +1378,7 @@ mod tests {
         // Test cycle detection capabilities with petgraph
         use petgraph::algo::is_cyclic_directed;
         use petgraph::graph::DiGraph;
-        
+
         // Create a DAG (no cycles)
         let mut dag = DiGraph::<String, ()>::new();
         let a = dag.add_node("A".to_string());
@@ -1187,16 +1386,16 @@ mod tests {
         let c = dag.add_node("C".to_string());
         dag.add_edge(a, b, ());
         dag.add_edge(b, c, ());
-        
+
         assert!(!is_cyclic_directed(&dag));
-        
+
         // Create a graph with cycle
         let mut cyclic = DiGraph::<String, ()>::new();
         let x = cyclic.add_node("X".to_string());
         let y = cyclic.add_node("Y".to_string());
         cyclic.add_edge(x, y, ());
         cyclic.add_edge(y, x, ());
-        
+
         assert!(is_cyclic_directed(&cyclic));
     }
 
@@ -1204,11 +1403,11 @@ mod tests {
     fn test_petgraph_dynamic_node_addition() {
         // Test dynamic node addition/removal with petgraph
         use petgraph::graph::DiGraph;
-        
+
         let mut graph = DiGraph::<String, ()>::new();
         let node1 = graph.add_node("Node 1".to_string());
         assert_eq!(graph.node_count(), 1);
-        
+
         let node2 = graph.add_node("Node 2".to_string());
         graph.add_edge(node1, node2, ());
         assert_eq!(graph.node_count(), 2);
@@ -1220,20 +1419,20 @@ mod tests {
         // Test topological sorting functionality with petgraph
         use petgraph::algo::toposort;
         use petgraph::graph::DiGraph;
-        
+
         let mut graph = DiGraph::<String, ()>::new();
         let a = graph.add_node("A".to_string());
         let b = graph.add_node("B".to_string());
         let c = graph.add_node("C".to_string());
         graph.add_edge(a, b, ());
         graph.add_edge(b, c, ());
-        
+
         let sorted = toposort(&graph, None).unwrap();
         // Topological sort should respect dependencies
         let a_pos = sorted.iter().position(|&n| n == a).unwrap();
         let b_pos = sorted.iter().position(|&n| n == b).unwrap();
         let c_pos = sorted.iter().position(|&n| n == c).unwrap();
-        
+
         assert!(a_pos < b_pos);
         assert!(b_pos < c_pos);
     }
@@ -1243,11 +1442,11 @@ mod tests {
         // Test basic DAG creation with daggy
         // daggy has a better API specifically for DAG creation
         use daggy::Dag;
-        
+
         let mut dag = Dag::<String, ()>::new();
         let node_a = dag.add_node("Node A".to_string());
         let node_b = dag.add_node("Node B".to_string());
-        
+
         // daggy's add_edge returns Result, preventing cycles at construction
         assert!(dag.add_edge(node_a, node_b, ()).is_ok());
         assert_eq!(dag.node_count(), 2);
@@ -1259,14 +1458,14 @@ mod tests {
         // Test cycle detection with daggy
         // daggy prevents cycles at construction time - better API than petgraph
         use daggy::Dag;
-        
+
         let mut dag = Dag::<String, ()>::new();
         let a = dag.add_node("A".to_string());
         let b = dag.add_node("B".to_string());
-        
+
         // Add edge A -> B (should succeed)
         assert!(dag.add_edge(a, b, ()).is_ok());
-        
+
         // Try to add edge B -> A (should fail - cycle detected at construction time)
         // This is better API than petgraph which requires separate is_cyclic_directed check
         assert!(dag.add_edge(b, a, ()).is_err());
@@ -1276,15 +1475,15 @@ mod tests {
     fn test_daggy_topological_sort() {
         // Test topological sorting with daggy
         use daggy::Dag;
-        
+
         let mut dag = Dag::<String, ()>::new();
         let a = dag.add_node("A".to_string());
         let b = dag.add_node("B".to_string());
         let c = dag.add_node("C".to_string());
-        
+
         dag.add_edge(a, b, ()).unwrap();
         dag.add_edge(b, c, ()).unwrap();
-        
+
         // daggy provides access to nodes
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
@@ -1310,16 +1509,16 @@ mod tests {
             m.insert("window".to_string(), "20".to_string());
             m
         });
-        
+
         let node_id = dag.add_node(
             "moving_average".to_string(),
             params.clone(),
             vec![asset_key],
         );
-        
+
         assert_eq!(dag.node_count(), 1);
         assert_eq!(dag.edge_count(), 0);
-        
+
         let node = dag.get_node(node_id).unwrap();
         assert_eq!(node.node_type, "moving_average");
         assert_eq!(node.params, params);
@@ -1331,7 +1530,7 @@ mod tests {
         let mut dag = AnalyticsDag::new();
         let asset_a = AssetKey::new_equity("AAPL").unwrap();
         let asset_b = AssetKey::new_equity("MSFT").unwrap();
-        
+
         // Create nodes
         let node1_id = dag.add_node(
             "price_data".to_string(),
@@ -1347,16 +1546,12 @@ mod tests {
             }),
             vec![asset_a],
         );
-        let node3_id = dag.add_node(
-            "correlation".to_string(),
-            NodeParams::None,
-            vec![asset_b],
-        );
-        
+        let node3_id = dag.add_node("correlation".to_string(), NodeParams::None, vec![asset_b]);
+
         // Create edges (dependencies)
         assert!(dag.add_edge(node1_id, node2_id).is_ok());
         assert!(dag.add_edge(node1_id, node3_id).is_ok());
-        
+
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
     }
@@ -1366,7 +1561,7 @@ mod tests {
         // Test node parameterization
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create node with parameters
         let params = NodeParams::Map({
             let mut m = HashMap::new();
@@ -1374,13 +1569,9 @@ mod tests {
             m.insert("method".to_string(), "simple".to_string());
             m
         });
-        
-        let node_id = dag.add_node(
-            "moving_average".to_string(),
-            params.clone(),
-            vec![asset],
-        );
-        
+
+        let node_id = dag.add_node("moving_average".to_string(), params.clone(), vec![asset]);
+
         let node = dag.get_node(node_id).unwrap();
         match &node.params {
             NodeParams::Map(map) => {
@@ -1398,16 +1589,16 @@ mod tests {
         // Test detecting cycles when adding new edge
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create a simple chain: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Add edges A -> B and B -> C (should succeed)
         assert!(dag.add_edge(node_a, node_b).is_ok());
         assert!(dag.add_edge(node_b, node_c).is_ok());
-        
+
         // Try to add edge C -> A (should fail - creates cycle A -> B -> C -> A)
         let result = dag.add_edge(node_c, node_a);
         assert!(result.is_err());
@@ -1424,18 +1615,18 @@ mod tests {
         // Test detecting cycles in existing DAG structure
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create nodes
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Create valid edges: A -> B, B -> C, C -> D
         assert!(dag.add_edge(node_a, node_b).is_ok());
         assert!(dag.add_edge(node_b, node_c).is_ok());
         assert!(dag.add_edge(node_c, node_d).is_ok());
-        
+
         // Try to create cycle: D -> B (would create B -> C -> D -> B)
         let result = dag.add_edge(node_d, node_b);
         assert!(result.is_err());
@@ -1447,19 +1638,19 @@ mod tests {
         // Test valid DAG (no cycles) passes detection
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create nodes
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Create valid edges (no cycles)
         assert!(dag.add_edge(node_a, node_b).is_ok());
         assert!(dag.add_edge(node_a, node_c).is_ok());
         assert!(dag.add_edge(node_b, node_d).is_ok());
         assert!(dag.add_edge(node_c, node_d).is_ok());
-        
+
         // DAG should be valid (no cycles)
         assert_eq!(dag.node_count(), 4);
         assert_eq!(dag.edge_count(), 4);
@@ -1470,17 +1661,17 @@ mod tests {
         // Test error messages for cycle detection
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Create edge A -> B
         assert!(dag.add_edge(node_a, node_b).is_ok());
-        
+
         // Try to create cycle B -> A
         let result = dag.add_edge(node_b, node_a);
         assert!(result.is_err());
-        
+
         if let Err(DagError::CycleDetected(msg)) = result {
             // Error message should indicate which nodes would form the cycle
             assert!(msg.contains("would create a cycle"));
@@ -1495,9 +1686,9 @@ mod tests {
         // Test that self-loops (node to itself) are detected as cycles
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Try to create edge A -> A (self-loop, should be detected as cycle)
         let result = dag.add_edge(node_a, node_a);
         assert!(result.is_err());
@@ -1509,19 +1700,19 @@ mod tests {
         // Test detecting cycles in more complex DAG structures
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create a diamond structure: A -> B, A -> C, B -> D, C -> D
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Create valid diamond structure
         assert!(dag.add_edge(node_a, node_b).is_ok());
         assert!(dag.add_edge(node_a, node_c).is_ok());
         assert!(dag.add_edge(node_b, node_d).is_ok());
         assert!(dag.add_edge(node_c, node_d).is_ok());
-        
+
         // Try to create cycle: D -> A (would create A -> B -> D -> A or A -> C -> D -> A)
         let result = dag.add_edge(node_d, node_a);
         assert!(result.is_err());
@@ -1535,22 +1726,22 @@ mod tests {
         // Test topological sort for simple linear DAG: A -> B -> C
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         let order = dag.execution_order().unwrap();
-        
+
         // Verify order respects dependencies
         assert_eq!(order.len(), 3);
         let a_pos = order.iter().position(|&id| id == node_a).unwrap();
         let b_pos = order.iter().position(|&id| id == node_b).unwrap();
         let c_pos = order.iter().position(|&id| id == node_c).unwrap();
-        
+
         assert!(a_pos < b_pos);
         assert!(b_pos < c_pos);
     }
@@ -1560,27 +1751,27 @@ mod tests {
         // Test topological sort for DAG with parallel branches (diamond structure)
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create diamond: A -> B, A -> C, B -> D, C -> D
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_a, node_c).unwrap();
         dag.add_edge(node_b, node_d).unwrap();
         dag.add_edge(node_c, node_d).unwrap();
-        
+
         let order = dag.execution_order().unwrap();
-        
+
         // Verify order respects dependencies
         assert_eq!(order.len(), 4);
         let a_pos = order.iter().position(|&id| id == node_a).unwrap();
         let b_pos = order.iter().position(|&id| id == node_b).unwrap();
         let c_pos = order.iter().position(|&id| id == node_c).unwrap();
         let d_pos = order.iter().position(|&id| id == node_d).unwrap();
-        
+
         // A must come before B and C
         assert!(a_pos < b_pos);
         assert!(a_pos < c_pos);
@@ -1594,7 +1785,7 @@ mod tests {
     fn test_toposort_empty_dag() {
         // Test edge case: empty DAG
         let mut dag = AnalyticsDag::new();
-        
+
         let order = dag.execution_order().unwrap();
         assert_eq!(order.len(), 0);
     }
@@ -1604,9 +1795,9 @@ mod tests {
         // Test edge case: single node
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset]);
-        
+
         let order = dag.execution_order().unwrap();
         assert_eq!(order.len(), 1);
         assert_eq!(order[0], node_a);
@@ -1617,14 +1808,14 @@ mod tests {
         // Test edge case: disconnected components (no edges)
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         // No edges - all nodes are disconnected
         let order = dag.execution_order().unwrap();
-        
+
         // All nodes should be in the result
         assert_eq!(order.len(), 3);
         assert!(order.contains(&node_a));
@@ -1637,18 +1828,18 @@ mod tests {
         // Test querying execution order without executing nodes
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         // Query execution order multiple times
         let order1 = dag.execution_order().unwrap();
         let order2 = dag.execution_order().unwrap();
-        
+
         // Should get the same result (from cache)
         assert_eq!(order1, order2);
         assert_eq!(order1.len(), 3);
@@ -1659,22 +1850,22 @@ mod tests {
         // Test that topological sort cache is invalidated when DAG changes
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         let order1 = dag.execution_order().unwrap();
         assert_eq!(order1.len(), 2);
-        
+
         // Add new node - should invalidate cache
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         let order2 = dag.execution_order().unwrap();
         assert_eq!(order2.len(), 3);
-        
+
         // Verify new order includes all nodes
         assert!(order2.contains(&node_a));
         assert!(order2.contains(&node_b));
@@ -1686,23 +1877,23 @@ mod tests {
         // Test complex DAG with multiple dependencies
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create complex structure
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_e = dag.add_node("E".to_string(), NodeParams::None, vec![asset]);
-        
+
         // A -> B, A -> C, B -> D, C -> D, D -> E
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_a, node_c).unwrap();
         dag.add_edge(node_b, node_d).unwrap();
         dag.add_edge(node_c, node_d).unwrap();
         dag.add_edge(node_d, node_e).unwrap();
-        
+
         let order = dag.execution_order().unwrap();
-        
+
         // Verify all dependencies are respected
         assert_eq!(order.len(), 5);
         let a_pos = order.iter().position(|&id| id == node_a).unwrap();
@@ -1710,7 +1901,7 @@ mod tests {
         let c_pos = order.iter().position(|&id| id == node_c).unwrap();
         let d_pos = order.iter().position(|&id| id == node_d).unwrap();
         let e_pos = order.iter().position(|&id| id == node_e).unwrap();
-        
+
         // Verify ordering constraints
         assert!(a_pos < b_pos);
         assert!(a_pos < c_pos);
@@ -1724,51 +1915,55 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_execution_independent_nodes() {
         // Test parallel execution of independent nodes
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use tokio::time::{sleep, Duration};
-        
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create three independent nodes (no edges between them)
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Track concurrent execution
         let concurrent_count = Arc::new(AtomicUsize::new(0));
         let max_concurrent = Arc::new(AtomicUsize::new(0));
-        
+
         let concurrent_clone = Arc::clone(&concurrent_count);
         let max_clone = Arc::clone(&max_concurrent);
-        
+
         let compute_fn = move |_node: Node, _inputs: Vec<NodeOutput>| {
             let concurrent = Arc::clone(&concurrent_clone);
             let max_conc = Arc::clone(&max_clone);
-            
+
             async move {
                 // Increment concurrent count
                 let current = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
-                
+
                 // Update max concurrent
                 max_conc.fetch_max(current, Ordering::SeqCst);
-                
+
                 // Simulate work
                 sleep(Duration::from_millis(50)).await;
-                
+
                 // Decrement concurrent count
                 concurrent.fetch_sub(1, Ordering::SeqCst);
-                
+
                 Ok(NodeOutput::None)
             }
         };
-        
+
         let _results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Verify that at least 2 nodes ran concurrently (ideally all 3)
         let max_conc = max_concurrent.load(Ordering::SeqCst);
-        assert!(max_conc >= 2, "Expected at least 2 concurrent executions, got {}", max_conc);
+        assert!(
+            max_conc >= 2,
+            "Expected at least 2 concurrent executions, got {}",
+            max_conc
+        );
     }
 
     #[tokio::test]
@@ -1776,45 +1971,45 @@ mod tests {
         // Test sequential execution of dependent nodes
         use std::sync::Arc;
         use tokio::sync::Mutex;
-        
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create linear chain: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         // Track execution order
         let execution_order = Arc::new(Mutex::new(Vec::new()));
         let order_clone = Arc::clone(&execution_order);
-        
+
         let compute_fn = move |node: Node, _inputs: Vec<NodeOutput>| {
             let order = Arc::clone(&order_clone);
-            
+
             async move {
                 let mut order_guard = order.lock().await;
                 order_guard.push(node.id);
                 drop(order_guard);
-                
+
                 Ok(NodeOutput::Scalar(node.id.0 as f64))
             }
         };
-        
+
         let _results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Verify execution order
         let final_order = execution_order.lock().await;
         assert_eq!(final_order.len(), 3);
-        
+
         // Find positions
         let a_pos = final_order.iter().position(|&id| id == node_a).unwrap();
         let b_pos = final_order.iter().position(|&id| id == node_b).unwrap();
         let c_pos = final_order.iter().position(|&id| id == node_c).unwrap();
-        
+
         // Verify A before B before C
         assert!(a_pos < b_pos);
         assert!(b_pos < c_pos);
@@ -1823,42 +2018,38 @@ mod tests {
     #[tokio::test]
     async fn test_thread_safe_execution() {
         // Test thread-safe execution with multiple concurrent nodes
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        
+        use std::sync::Arc;
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create multiple independent nodes
         let mut nodes = Vec::new();
         for i in 0..5 {
-            let node_id = dag.add_node(
-                format!("Node{}", i),
-                NodeParams::None,
-                vec![asset.clone()],
-            );
+            let node_id = dag.add_node(format!("Node{}", i), NodeParams::None, vec![asset.clone()]);
             nodes.push(node_id);
         }
-        
+
         // Shared counter (tests thread safety)
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
-        
+
         let compute_fn = move |_node: Node, _inputs: Vec<NodeOutput>| {
             let counter = Arc::clone(&counter_clone);
-            
+
             async move {
                 // Simulate concurrent access
                 for _ in 0..100 {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }
-                
+
                 Ok(NodeOutput::None)
             }
         };
-        
+
         let _results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Verify counter (should be 5 nodes * 100 increments = 500)
         assert_eq!(counter.load(Ordering::SeqCst), 500);
     }
@@ -1868,58 +2059,70 @@ mod tests {
         // Test execution with mixed parallel and sequential nodes (diamond structure)
         use std::sync::Arc;
         use tokio::sync::Mutex;
-        
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create diamond: A -> B, A -> C, B -> D, C -> D
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_a, node_c).unwrap();
         dag.add_edge(node_b, node_d).unwrap();
         dag.add_edge(node_c, node_d).unwrap();
-        
+
         // Track execution order
         let execution_order = Arc::new(Mutex::new(Vec::new()));
         let order_clone = Arc::clone(&execution_order);
-        
+
         let compute_fn = move |node: Node, inputs: Vec<NodeOutput>| {
             let order = Arc::clone(&order_clone);
-            
+
             async move {
                 let mut order_guard = order.lock().await;
                 order_guard.push((node.id, inputs.len()));
                 drop(order_guard);
-                
+
                 Ok(NodeOutput::Scalar(node.id.0 as f64))
             }
         };
-        
+
         let _results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Verify execution order
         let final_order = execution_order.lock().await;
         assert_eq!(final_order.len(), 4);
-        
+
         // Find positions
-        let a_pos = final_order.iter().position(|(id, _)| *id == node_a).unwrap();
-        let b_pos = final_order.iter().position(|(id, _)| *id == node_b).unwrap();
-        let c_pos = final_order.iter().position(|(id, _)| *id == node_c).unwrap();
-        let d_pos = final_order.iter().position(|(id, _)| *id == node_d).unwrap();
-        
+        let a_pos = final_order
+            .iter()
+            .position(|(id, _)| *id == node_a)
+            .unwrap();
+        let b_pos = final_order
+            .iter()
+            .position(|(id, _)| *id == node_b)
+            .unwrap();
+        let c_pos = final_order
+            .iter()
+            .position(|(id, _)| *id == node_c)
+            .unwrap();
+        let d_pos = final_order
+            .iter()
+            .position(|(id, _)| *id == node_d)
+            .unwrap();
+
         // A must execute first
         assert!(a_pos < b_pos);
         assert!(a_pos < c_pos);
-        
+
         // B and C can be in any order (parallel)
         // But both must be before D
         assert!(b_pos < d_pos);
         assert!(c_pos < d_pos);
-        
+
         // D should have received 2 inputs (from B and C)
         let d_inputs = final_order.iter().find(|(id, _)| *id == node_d).unwrap().1;
         assert_eq!(d_inputs, 2);
@@ -1930,15 +2133,15 @@ mod tests {
         // Test that node outputs are passed correctly to dependent nodes
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create chain: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         let compute_fn = move |node: Node, inputs: Vec<NodeOutput>| {
             async move {
                 // Sum all input scalars and add node ID
@@ -1949,29 +2152,29 @@ mod tests {
                         _ => None,
                     })
                     .sum();
-                
+
                 let result = input_sum + (node.id.0 as f64);
                 Ok(NodeOutput::Scalar(result))
             }
         };
-        
+
         let results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Node A (id=0): 0 (no inputs)
         // Node B (id=1): 0 + 1 = 1
         // Node C (id=2): 1 + 2 = 3
         assert_eq!(results.len(), 3);
-        
+
         match results.get(&node_a).unwrap() {
             NodeOutput::Scalar(v) => assert_eq!(*v, 0.0),
             _ => panic!("Expected scalar"),
         }
-        
+
         match results.get(&node_b).unwrap() {
             NodeOutput::Scalar(v) => assert_eq!(*v, 1.0),
             _ => panic!("Expected scalar"),
         }
-        
+
         match results.get(&node_c).unwrap() {
             NodeOutput::Scalar(v) => assert_eq!(*v, 3.0),
             _ => panic!("Expected scalar"),
@@ -1982,11 +2185,9 @@ mod tests {
     async fn test_execution_empty_dag() {
         // Test execution of empty DAG
         let mut dag = AnalyticsDag::new();
-        
-        let compute_fn = |_node: Node, _inputs: Vec<NodeOutput>| async {
-            Ok(NodeOutput::None)
-        };
-        
+
+        let compute_fn = |_node: Node, _inputs: Vec<NodeOutput>| async { Ok(NodeOutput::None) };
+
         let results = dag.execute(compute_fn).await.unwrap();
         assert_eq!(results.len(), 0);
     }
@@ -1996,15 +2197,15 @@ mod tests {
         // Test execution of single node
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset]);
-        
+
         let compute_fn = |node: Node, _inputs: Vec<NodeOutput>| async move {
             Ok(NodeOutput::Scalar(node.id.0 as f64 * 10.0))
         };
-        
+
         let results = dag.execute(compute_fn).await.unwrap();
-        
+
         assert_eq!(results.len(), 1);
         match results.get(&node_a).unwrap() {
             NodeOutput::Scalar(v) => assert_eq!(*v, 0.0),
@@ -2019,29 +2220,29 @@ mod tests {
         // Test adding new nodes with dependencies on existing nodes
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create initial nodes
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         assert_eq!(dag.node_count(), 2);
-        
+
         // Add new node C with dependency on B (B -> C)
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
-        
+
         // Verify execution order is updated
         let order = dag.execution_order().unwrap();
         assert_eq!(order.len(), 3);
-        
+
         let a_pos = order.iter().position(|&id| id == node_a).unwrap();
         let b_pos = order.iter().position(|&id| id == node_b).unwrap();
         let c_pos = order.iter().position(|&id| id == node_c).unwrap();
-        
+
         assert!(a_pos < b_pos);
         assert!(b_pos < c_pos);
     }
@@ -2051,23 +2252,23 @@ mod tests {
         // Test removing nodes with no dependencies (leaf nodes)
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create chain: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         assert_eq!(dag.node_count(), 3);
-        
+
         // Remove leaf node C (no dependencies)
         assert!(!dag.has_dependencies(node_c));
         dag.remove_node(node_c).unwrap();
-        
+
         assert_eq!(dag.node_count(), 2);
-        
+
         // Verify execution order is updated
         let order = dag.execution_order().unwrap();
         assert_eq!(order.len(), 2);
@@ -2079,19 +2280,19 @@ mod tests {
         // Test that nodes with dependencies cannot be removed
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create chain: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         // Try to remove node B (has dependency C)
         assert!(dag.has_dependencies(node_b));
         let result = dag.remove_node(node_b);
-        
+
         assert!(result.is_err());
         match result {
             Err(DagError::InvalidOperation(msg)) => {
@@ -2099,7 +2300,7 @@ mod tests {
             }
             _ => panic!("Expected InvalidOperation error"),
         }
-        
+
         // Node count should remain unchanged
         assert_eq!(dag.node_count(), 3);
     }
@@ -2109,24 +2310,24 @@ mod tests {
         // Test cycle detection after adding nodes dynamically
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create initial chain: A -> B
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         // Add node C
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Create edge B -> C
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         // Try to create cycle: C -> A
         let result = dag.add_edge(node_c, node_a);
-        
+
         assert!(result.is_err());
         assert!(matches!(result, Err(DagError::CycleDetected(_))));
-        
+
         // DAG should remain valid (no cycle)
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
@@ -2137,26 +2338,26 @@ mod tests {
         // Test that execution order is correctly updated after modifications
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create initial structure: A -> B
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         let order1 = dag.execution_order().unwrap();
         assert_eq!(order1.len(), 2);
-        
+
         // Add node C with edge B -> C
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         let order2 = dag.execution_order().unwrap();
         assert_eq!(order2.len(), 3);
         assert!(order2.contains(&node_c));
-        
+
         // Remove node C
         dag.remove_node(node_c).unwrap();
-        
+
         let order3 = dag.execution_order().unwrap();
         assert_eq!(order3.len(), 2);
         assert!(!order3.contains(&node_c));
@@ -2168,42 +2369,42 @@ mod tests {
         // Test complex dynamic modifications
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create initial structure: A -> B, A -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_a, node_c).unwrap();
-        
+
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
-        
+
         // Add node D with edges B -> D, C -> D (diamond structure)
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_b, node_d).unwrap();
         dag.add_edge(node_c, node_d).unwrap();
-        
+
         assert_eq!(dag.node_count(), 4);
         assert_eq!(dag.edge_count(), 4);
-        
+
         // Verify execution order
         let order = dag.execution_order().unwrap();
         let a_pos = order.iter().position(|&id| id == node_a).unwrap();
         let d_pos = order.iter().position(|&id| id == node_d).unwrap();
         assert!(a_pos < d_pos);
-        
+
         // Remove leaf node D
         dag.remove_node(node_d).unwrap();
-        
+
         assert_eq!(dag.node_count(), 3);
         assert_eq!(dag.edge_count(), 2);
-        
+
         // Now B and C are leaf nodes, remove both
         dag.remove_node(node_b).unwrap();
         dag.remove_node(node_c).unwrap();
-        
+
         assert_eq!(dag.node_count(), 1);
         assert_eq!(dag.edge_count(), 0);
     }
@@ -2213,16 +2414,16 @@ mod tests {
         // Test removing a node that doesn't exist
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Try to remove non-existent node
         let fake_node = NodeId(999);
         let result = dag.remove_node(fake_node);
-        
+
         assert!(result.is_err());
         assert!(matches!(result, Err(DagError::NodeNotFound(_))));
-        
+
         // Original node should still exist
         assert_eq!(dag.node_count(), 1);
         assert!(dag.get_node(node_a).is_some());
@@ -2233,10 +2434,10 @@ mod tests {
         // Test adding multiple parallel branches dynamically
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Start with single root node
         let root = dag.add_node("Root".to_string(), NodeParams::None, vec![asset.clone()]);
-        
+
         // Add multiple branches
         let mut leaf_nodes = Vec::new();
         for i in 0..5 {
@@ -2248,19 +2449,19 @@ mod tests {
             dag.add_edge(root, branch).unwrap();
             leaf_nodes.push(branch);
         }
-        
+
         assert_eq!(dag.node_count(), 6); // 1 root + 5 branches
         assert_eq!(dag.edge_count(), 5);
-        
+
         // Verify all branches are children of root
         let root_children = dag.get_children(root);
         assert_eq!(root_children.len(), 5);
-        
+
         // Remove all leaf nodes
         for leaf in leaf_nodes {
             dag.remove_node(leaf).unwrap();
         }
-        
+
         assert_eq!(dag.node_count(), 1);
         assert_eq!(dag.edge_count(), 0);
     }
@@ -2271,39 +2472,55 @@ mod tests {
     fn test_integration_with_asset_key_and_time_series_point() {
         // Test DAG integration with AssetKey and TimeSeriesPoint
         use chrono::Utc;
-        
+
         let mut dag = AnalyticsDag::new();
-        
+
         // Create nodes with different asset keys
         let aapl = AssetKey::new_equity("AAPL").unwrap();
         let msft = AssetKey::new_equity("MSFT").unwrap();
-        let es_future = AssetKey::new_future("ES".to_string(), chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()).unwrap();
-        
-        let node1 = dag.add_node("AAPL_data".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let node2 = dag.add_node("MSFT_data".to_string(), NodeParams::None, vec![msft.clone()]);
+        let es_future = AssetKey::new_future(
+            "ES".to_string(),
+            chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+        )
+        .unwrap();
+
+        let node1 = dag.add_node(
+            "AAPL_data".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let node2 = dag.add_node(
+            "MSFT_data".to_string(),
+            NodeParams::None,
+            vec![msft.clone()],
+        );
         let node3 = dag.add_node("ES_data".to_string(), NodeParams::None, vec![es_future]);
-        let node4 = dag.add_node("correlation".to_string(), NodeParams::None, vec![aapl, msft]);
-        
+        let node4 = dag.add_node(
+            "correlation".to_string(),
+            NodeParams::None,
+            vec![aapl, msft],
+        );
+
         // Add dependencies
         dag.add_edge(node1, node4).unwrap();
         dag.add_edge(node2, node4).unwrap();
-        
+
         // Verify nodes and edges
         assert_eq!(dag.node_count(), 4);
         assert_eq!(dag.edge_count(), 2);
-        
+
         // Verify node data
         let node1_data = dag.get_node(node1).unwrap();
         assert_eq!(node1_data.node_type, "AAPL_data");
         assert_eq!(node1_data.assets.len(), 1);
-        
+
         let node4_data = dag.get_node(node4).unwrap();
         assert_eq!(node4_data.assets.len(), 2);
-        
+
         // Test TimeSeriesPoint in NodeOutput
         let ts_point = TimeSeriesPoint::new(Utc::now(), 150.0);
         let output = NodeOutput::Single(vec![ts_point.clone()]);
-        
+
         match output {
             NodeOutput::Single(points) => {
                 assert_eq!(points.len(), 1);
@@ -2316,17 +2533,21 @@ mod tests {
     #[tokio::test]
     async fn test_integration_with_data_provider() {
         // Test DAG integration with DataProvider trait
-        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use crate::time_series::{DateRange, InMemoryDataProvider};
         use chrono::{NaiveDate, Utc};
-        
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create simple DAG
-        let node_a = dag.add_node("data_fetch".to_string(), NodeParams::None, vec![asset.clone()]);
+        let node_a = dag.add_node(
+            "data_fetch".to_string(),
+            NodeParams::None,
+            vec![asset.clone()],
+        );
         let node_b = dag.add_node("compute".to_string(), NodeParams::None, vec![asset.clone()]);
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         // Create data provider with test data
         let mut provider = InMemoryDataProvider::new();
         let test_data = vec![
@@ -2337,14 +2558,14 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
         );
-        
+
         provider.add_data(asset.clone(), test_data.clone());
-        
+
         // Execute DAG with simulated data (demonstrating integration pattern)
         let test_data_arc = Arc::new(test_data.clone());
         let compute_fn = move |node: Node, inputs: Vec<NodeOutput>| {
             let data = Arc::clone(&test_data_arc);
-            
+
             async move {
                 if node.node_type == "data_fetch" {
                     // Simulate fetching data from provider
@@ -2356,12 +2577,12 @@ mod tests {
                 }
             }
         };
-        
+
         let results = dag.execute(compute_fn).await.unwrap();
-        
+
         // Verify results
         assert_eq!(results.len(), 2);
-        
+
         match results.get(&node_a).unwrap() {
             NodeOutput::Single(data) => {
                 // Verify data was returned from the simulated fetch
@@ -2371,7 +2592,7 @@ mod tests {
             }
             _ => panic!("Expected Single output"),
         }
-        
+
         // Verify that DataProvider trait integration works
         // Note: InMemoryDataProvider filters by date range, so test data needs matching timestamps
         // For integration testing, we verify the pattern works with the DAG execution above
@@ -2382,30 +2603,30 @@ mod tests {
         // Test push-mode API hooks and incremental update triggering
         use std::sync::Arc;
         use tokio::sync::Mutex;
-        
+
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create DAG: A -> B -> C
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_b, node_c).unwrap();
-        
+
         // Track which nodes were executed
         let executed = Arc::new(Mutex::new(Vec::new()));
         let executed_clone = Arc::clone(&executed);
-        
+
         let compute_fn = move |node: Node, inputs: Vec<NodeOutput>| {
             let executed = Arc::clone(&executed_clone);
-            
+
             async move {
                 let mut exec_guard = executed.lock().await;
                 exec_guard.push(node.id);
                 drop(exec_guard);
-                
+
                 let input_sum: f64 = inputs
                     .iter()
                     .filter_map(|output| match output {
@@ -2413,21 +2634,21 @@ mod tests {
                         _ => None,
                     })
                     .sum();
-                
+
                 Ok(NodeOutput::Scalar(input_sum + node.id.0 as f64))
             }
         };
-        
+
         // Simulate incremental update when node_a changes
         let results = dag.execute_incremental(node_a, compute_fn).await.unwrap();
-        
+
         // Only B and C should be executed (descendants of A)
         let exec_list = executed.lock().await;
         assert_eq!(exec_list.len(), 2);
         assert!(exec_list.contains(&node_b));
         assert!(exec_list.contains(&node_c));
         assert!(!exec_list.contains(&node_a)); // A itself not re-executed
-        
+
         // Results should contain B and C
         assert_eq!(results.len(), 2);
         assert!(results.contains_key(&node_b));
@@ -2439,30 +2660,30 @@ mod tests {
         // Test getting descendants for push-mode propagation
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create diamond: A -> B, A -> C, B -> D, C -> D
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_c = dag.add_node("C".to_string(), NodeParams::None, vec![asset.clone()]);
         let node_d = dag.add_node("D".to_string(), NodeParams::None, vec![asset]);
-        
+
         dag.add_edge(node_a, node_b).unwrap();
         dag.add_edge(node_a, node_c).unwrap();
         dag.add_edge(node_b, node_d).unwrap();
         dag.add_edge(node_c, node_d).unwrap();
-        
+
         // Get descendants of A (should be B, C, D)
         let descendants_a = dag.get_descendants(node_a);
         assert_eq!(descendants_a.len(), 3);
         assert!(descendants_a.contains(&node_b));
         assert!(descendants_a.contains(&node_c));
         assert!(descendants_a.contains(&node_d));
-        
+
         // Get descendants of B (should be D)
         let descendants_b = dag.get_descendants(node_b);
         assert_eq!(descendants_b.len(), 1);
         assert!(descendants_b.contains(&node_d));
-        
+
         // Get descendants of D (should be empty - leaf node)
         let descendants_d = dag.get_descendants(node_d);
         assert_eq!(descendants_d.len(), 0);
@@ -2473,14 +2694,14 @@ mod tests {
         // Test error handling following existing patterns (Result types, clear messages)
         let mut dag = AnalyticsDag::new();
         let asset = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let node_a = dag.add_node("A".to_string(), NodeParams::None, vec![asset]);
-        
+
         // Test NodeNotFound error
         let fake_node = NodeId(999);
         let result = dag.remove_node(fake_node);
         assert!(result.is_err());
-        
+
         match result {
             Err(DagError::NodeNotFound(msg)) => {
                 assert!(msg.contains("NodeId(999)"));
@@ -2488,17 +2709,21 @@ mod tests {
             }
             _ => panic!("Expected NodeNotFound error"),
         }
-        
+
         // Test CycleDetected error
         let result = dag.add_edge(node_a, node_a);
         assert!(result.is_err());
         assert!(matches!(result, Err(DagError::CycleDetected(_))));
-        
+
         // Test InvalidOperation error
         // Add a dependent first
-        let node_b = dag.add_node("B".to_string(), NodeParams::None, vec![AssetKey::new_equity("MSFT").unwrap()]);
+        let node_b = dag.add_node(
+            "B".to_string(),
+            NodeParams::None,
+            vec![AssetKey::new_equity("MSFT").unwrap()],
+        );
         dag.add_edge(node_a, node_b).unwrap();
-        
+
         let result = dag.remove_node(node_a);
         assert!(result.is_err());
         match result {
@@ -2513,24 +2738,22 @@ mod tests {
     fn test_node_output_types() {
         // Test different NodeOutput types (Single, Collection, Scalar, None)
         use chrono::Utc;
-        
+
         // Single time series
-        let single = NodeOutput::Single(vec![
-            TimeSeriesPoint::new(Utc::now(), 100.0),
-        ]);
+        let single = NodeOutput::Single(vec![TimeSeriesPoint::new(Utc::now(), 100.0)]);
         assert!(matches!(single, NodeOutput::Single(_)));
-        
+
         // Collection of time series
         let collection = NodeOutput::Collection(vec![
             vec![TimeSeriesPoint::new(Utc::now(), 100.0)],
             vec![TimeSeriesPoint::new(Utc::now(), 200.0)],
         ]);
         assert!(matches!(collection, NodeOutput::Collection(_)));
-        
+
         // Scalar value
         let scalar = NodeOutput::Scalar(42.0);
         assert!(matches!(scalar, NodeOutput::Scalar(_)));
-        
+
         // No output
         let none = NodeOutput::None;
         assert!(matches!(none, NodeOutput::None));
@@ -2540,10 +2763,10 @@ mod tests {
     async fn test_multi_asset_node_execution() {
         // Test nodes operating on multiple assets
         let mut dag = AnalyticsDag::new();
-        
+
         let aapl = AssetKey::new_equity("AAPL").unwrap();
         let msft = AssetKey::new_equity("MSFT").unwrap();
-        
+
         // Node operating on two assets (e.g., correlation)
         let correlation_node = dag.add_node(
             "correlation".to_string(),
@@ -2554,17 +2777,17 @@ mod tests {
             }),
             vec![aapl, msft],
         );
-        
+
         let compute_fn = |node: Node, _inputs: Vec<NodeOutput>| async move {
             // Verify multi-asset node
             assert_eq!(node.assets.len(), 2);
-            
+
             // Simulate correlation computation
             Ok(NodeOutput::Scalar(0.85))
         };
-        
+
         let results = dag.execute(compute_fn).await.unwrap();
-        
+
         match results.get(&correlation_node).unwrap() {
             NodeOutput::Scalar(v) => assert_eq!(*v, 0.85),
             _ => panic!("Expected Scalar output"),
@@ -2576,14 +2799,14 @@ mod tests {
         // Test DataProviderError to DagError conversion
         let provider_err = DataProviderError::AssetNotFound;
         let dag_err: DagError = provider_err.into();
-        
+
         match dag_err {
             DagError::DataProviderError(msg) => {
                 assert!(msg.contains("Asset not found"));
             }
             _ => panic!("Expected DataProviderError variant"),
         }
-        
+
         // Test error display
         let err = DagError::DataProviderError("Test error".to_string());
         let err_string = format!("{}", err);
@@ -2596,31 +2819,37 @@ mod tests {
     #[test]
     fn test_execute_pull_mode_single_dataprovider_node() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         // Set up test data
         let mut provider = InMemoryDataProvider::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let test_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 101.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 102.0),
         ];
         provider.add_data(aapl.clone(), test_data.clone());
-        
+
         // Create DAG with single DataProvider node
         let mut dag = AnalyticsDag::new();
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+
         // Execute in pull-mode
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         );
-        
-        let result = dag.execute_pull_mode(data_node, date_range, &provider).unwrap();
-        
+
+        let result = dag
+            .execute_pull_mode(data_node, date_range, &provider)
+            .unwrap();
+
         // Verify results
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].close_price, 100.0);
@@ -2632,18 +2861,18 @@ mod tests {
     fn test_execute_pull_mode_node_not_found() {
         use crate::time_series::InMemoryDataProvider;
         use chrono::NaiveDate;
-        
+
         let provider = InMemoryDataProvider::new();
         let dag = AnalyticsDag::new();
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
         );
-        
+
         let non_existent_node = NodeId(999);
         let result = dag.execute_pull_mode(non_existent_node, date_range, &provider);
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DagError::NodeNotFound(_)));
     }
@@ -2651,12 +2880,12 @@ mod tests {
     #[test]
     fn test_execute_pull_mode_returns_node() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         // Create DAG with dependencies: DataProvider -> Returns
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Set up test data
         let mut provider = InMemoryDataProvider::new();
         let test_data = vec![
@@ -2665,25 +2894,32 @@ mod tests {
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 101.0),
         ];
         provider.add_data(aapl.clone(), test_data);
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let returns_node =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
         dag.add_edge(data_node, returns_node).unwrap();
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         );
-        
+
         // Execute pull-mode
-        let result = dag.execute_pull_mode(returns_node, date_range, &provider).unwrap();
-        
+        let result = dag
+            .execute_pull_mode(returns_node, date_range, &provider)
+            .unwrap();
+
         // Should have 3 returns (same length as prices)
         assert_eq!(result.len(), 3);
-        
+
         // First return is NaN (no previous price)
         assert!(result[0].close_price.is_nan() || result[0].close_price == 0.0);
-        
+
         // Verify returns calculations: ln(102/100) ≈ 0.0198, ln(101/102) ≈ -0.0099
         assert!((result[1].close_price - (102.0_f64 / 100.0).ln()).abs() < 0.0001);
         assert!((result[2].close_price - (101.0_f64 / 102.0).ln()).abs() < 0.0001);
@@ -2692,13 +2928,13 @@ mod tests {
     #[test]
     fn test_execute_pull_mode_volatility_node() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
+        use chrono::{NaiveDate, TimeZone, Utc};
         use std::collections::HashMap;
-        
+
         // Create DAG: DataProvider -> Returns -> Volatility
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Set up test data with more points for volatility
         let mut provider = InMemoryDataProvider::new();
         let mut test_data = Vec::new();
@@ -2711,35 +2947,54 @@ mod tests {
             price += (day % 3) as f64 - 1.0; // Vary prices
         }
         provider.add_data(aapl.clone(), test_data);
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let returns_node =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
         // Volatility node with window size parameter
         let mut vol_params = HashMap::new();
         vol_params.insert("window_size".to_string(), "5".to_string());
-        let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl.clone()]);
-        
+        let vol_node = dag.add_node(
+            "Volatility".to_string(),
+            NodeParams::Map(vol_params),
+            vec![aapl.clone()],
+        );
+
         dag.add_edge(data_node, returns_node).unwrap();
         dag.add_edge(returns_node, vol_node).unwrap();
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
         );
-        
+
         // Execute pull-mode
-        let result = dag.execute_pull_mode(vol_node, date_range, &provider).unwrap();
-        
+        let result = dag
+            .execute_pull_mode(vol_node, date_range, &provider)
+            .unwrap();
+
         // Volatility starts after window is full
         // 15 prices -> 14 returns -> 10 volatility values (window=5)
-        assert!(result.len() >= 5, "Expected at least 5 volatility values, got {}", result.len());
-        
+        assert!(
+            result.len() >= 5,
+            "Expected at least 5 volatility values, got {}",
+            result.len()
+        );
+
         // All volatility values should be non-negative (or NaN)
         for (i, point) in result.iter().enumerate() {
             if !point.close_price.is_nan() {
-                assert!(point.close_price >= 0.0, 
-                    "Volatility at index {} should be non-negative, got {}", i, point.close_price);
+                assert!(
+                    point.close_price >= 0.0,
+                    "Volatility at index {} should be non-negative, got {}",
+                    i,
+                    point.close_price
+                );
             }
         }
     }
@@ -2750,9 +3005,9 @@ mod tests {
     fn test_calculate_burnin_days_dataprovider() {
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         // DataProvider should need 0 burn-in days
         assert_eq!(dag.calculate_burnin_days(data_node), 0);
     }
@@ -2761,11 +3016,15 @@ mod tests {
     fn test_calculate_burnin_days_returns() {
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
         let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
         dag.add_edge(data_node, returns_node).unwrap();
-        
+
         // Returns should need 1 burn-in day (for first return calculation)
         assert_eq!(dag.calculate_burnin_days(returns_node), 1);
     }
@@ -2773,20 +3032,29 @@ mod tests {
     #[test]
     fn test_calculate_burnin_days_volatility() {
         use std::collections::HashMap;
-        
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let returns_node =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
         let mut vol_params = HashMap::new();
         vol_params.insert("window_size".to_string(), "10".to_string());
-        let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl]);
-        
+        let vol_node = dag.add_node(
+            "Volatility".to_string(),
+            NodeParams::Map(vol_params),
+            vec![aapl],
+        );
+
         dag.add_edge(data_node, returns_node).unwrap();
         dag.add_edge(returns_node, vol_node).unwrap();
-        
+
         // Volatility(10) should need 11 burn-in days (10 for window + 1 for returns)
         assert_eq!(dag.calculate_burnin_days(vol_node), 11);
     }
@@ -2794,11 +3062,11 @@ mod tests {
     #[test]
     fn test_pull_mode_with_burnin_filters_correctly() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create test data with extra days before the requested range
         let mut provider = InMemoryDataProvider::new();
         let mut test_data = Vec::new();
@@ -2809,22 +3077,28 @@ mod tests {
             ));
         }
         provider.add_data(aapl.clone(), test_data);
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
         let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
         dag.add_edge(data_node, returns_node).unwrap();
-        
+
         // Request only days 5-10
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
         );
-        
-        let result = dag.execute_pull_mode(returns_node, date_range, &provider).unwrap();
-        
+
+        let result = dag
+            .execute_pull_mode(returns_node, date_range, &provider)
+            .unwrap();
+
         // Result should only contain days 5-10 (6 days)
         assert_eq!(result.len(), 6);
-        
+
         // Verify timestamps are within requested range
         for point in &result {
             let date = point.timestamp.date_naive();
@@ -2837,14 +3111,14 @@ mod tests {
 
     #[test]
     fn test_execution_cache_basic_operations() {
-        use chrono::{Utc, TimeZone, NaiveDate};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut cache = ExecutionCache::new();
         let node_id = NodeId(1);
-        
+
         // Test empty cache
         assert!(cache.get(node_id).is_none());
-        
+
         // Insert data
         let test_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
@@ -2854,13 +3128,13 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         );
-        
+
         cache.insert(node_id, test_data.clone(), range);
-        
+
         // Test get
         assert_eq!(cache.get(node_id).unwrap().len(), 2);
         assert_eq!(cache.get(node_id).unwrap()[0].close_price, 100.0);
-        
+
         // Test clear
         cache.clear();
         assert!(cache.get(node_id).is_none());
@@ -2868,11 +3142,11 @@ mod tests {
 
     #[test]
     fn test_execution_cache_extract_range() {
-        use chrono::{Utc, TimeZone, NaiveDate};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut cache = ExecutionCache::new();
         let node_id = NodeId(1);
-        
+
         // Insert data spanning 5 days
         let test_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
@@ -2885,17 +3159,17 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
         );
-        
+
         cache.insert(node_id, test_data, full_range);
-        
+
         // Extract subset (days 2-4)
         let subset_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
         );
-        
+
         let extracted = cache.extract_range(node_id, &subset_range).unwrap();
-        
+
         // Should have 3 days
         assert_eq!(extracted.len(), 3);
         assert_eq!(extracted[0].close_price, 101.0);
@@ -2906,13 +3180,13 @@ mod tests {
     #[test]
     fn test_execution_cache_diamond_dependency() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         // Create diamond DAG: Data -> (Node1, Node2) -> Node3
         // This tests that Node3 can retrieve both parent outputs from cache
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
         let test_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
@@ -2920,24 +3194,34 @@ mod tests {
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), 104.0),
         ];
         provider.add_data(aapl.clone(), test_data);
-        
+
         // Create diamond structure
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node1 = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node2 = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let returns_node1 =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let returns_node2 =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
         dag.add_edge(data_node, returns_node1).unwrap();
         dag.add_edge(data_node, returns_node2).unwrap();
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         );
-        
+
         // Execute both nodes - they should both use the cached data_node output
-        let result1 = dag.execute_pull_mode(returns_node1, date_range.clone(), &provider).unwrap();
-        let result2 = dag.execute_pull_mode(returns_node2, date_range, &provider).unwrap();
-        
+        let result1 = dag
+            .execute_pull_mode(returns_node1, date_range.clone(), &provider)
+            .unwrap();
+        let result2 = dag
+            .execute_pull_mode(returns_node2, date_range, &provider)
+            .unwrap();
+
         // Both should produce identical results
         assert_eq!(result1.len(), result2.len());
         for (p1, p2) in result1.iter().zip(result2.iter()) {
@@ -2954,43 +3238,49 @@ mod tests {
     #[test]
     fn test_parallel_execution_two_independent_nodes() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
         let msft = AssetKey::new_equity("MSFT").unwrap();
-        
+
         // Set up test data for both assets
         let mut provider = InMemoryDataProvider::new();
-        
+
         let aapl_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 102.0),
         ];
         provider.add_data(aapl.clone(), aapl_data);
-        
+
         let msft_data = vec![
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 200.0),
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), 204.0),
         ];
         provider.add_data(msft.clone(), msft_data);
-        
+
         // Create independent nodes for each asset
-        let aapl_data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let msft_data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![msft.clone()]);
-        
+        let aapl_data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let msft_data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![msft.clone()],
+        );
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
         );
-        
+
         // Execute in parallel
-        let results = dag.execute_pull_mode_parallel(
-            vec![aapl_data_node, msft_data_node],
-            date_range,
-            &provider,
-        ).unwrap();
-        
+        let results = dag
+            .execute_pull_mode_parallel(vec![aapl_data_node, msft_data_node], date_range, &provider)
+            .unwrap();
+
         // Verify results
         assert_eq!(results.len(), 2);
         assert_eq!(results.get(&aapl_data_node).unwrap().len(), 2);
@@ -3002,44 +3292,63 @@ mod tests {
     #[test]
     fn test_parallel_execution_multiple_assets_same_analytic() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
-        
+
         // Create 3 assets
         let aapl = AssetKey::new_equity("AAPL").unwrap();
         let msft = AssetKey::new_equity("MSFT").unwrap();
         let googl = AssetKey::new_equity("GOOGL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
-        
+
         // Add data for all 3 assets
-        for (asset, base_price) in vec![(aapl.clone(), 100.0), (msft.clone(), 200.0), (googl.clone(), 300.0)] {
+        for (asset, base_price) in vec![
+            (aapl.clone(), 100.0),
+            (msft.clone(), 200.0),
+            (googl.clone(), 300.0),
+        ] {
             let data = vec![
-                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), base_price),
-                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), base_price + 2.0),
-                TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), base_price + 4.0),
+                TimeSeriesPoint::new(
+                    Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+                    base_price,
+                ),
+                TimeSeriesPoint::new(
+                    Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(),
+                    base_price + 2.0,
+                ),
+                TimeSeriesPoint::new(
+                    Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(),
+                    base_price + 4.0,
+                ),
             ];
             provider.add_data(asset, data);
         }
-        
+
         // Create Returns nodes for all 3 assets
         let mut node_ids = Vec::new();
         for asset in vec![aapl, msft, googl] {
-            let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![asset.clone()]);
+            let data_node = dag.add_node(
+                "DataProvider".to_string(),
+                NodeParams::None,
+                vec![asset.clone()],
+            );
             let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![asset]);
             dag.add_edge(data_node, returns_node).unwrap();
             node_ids.push(returns_node);
         }
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 3).unwrap(),
         );
-        
+
         // Execute all 3 in parallel
-        let results = dag.execute_pull_mode_parallel(node_ids.clone(), date_range, &provider).unwrap();
-        
+        let results = dag
+            .execute_pull_mode_parallel(node_ids.clone(), date_range, &provider)
+            .unwrap();
+
         // Verify all 3 completed
         assert_eq!(results.len(), 3);
         for node_id in node_ids {
@@ -3051,19 +3360,19 @@ mod tests {
     fn test_parallel_execution_error_handling() {
         use crate::time_series::InMemoryDataProvider;
         use chrono::NaiveDate;
-        
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create a node but don't provide data - should error
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         let provider = InMemoryDataProvider::new(); // Empty provider
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
         );
-        
+
         // Should return error
         let result = dag.execute_pull_mode_parallel(vec![data_node], date_range, &provider);
         assert!(result.is_err());
@@ -3074,97 +3383,115 @@ mod tests {
     #[test]
     fn test_integration_with_inmemory_provider_various_ranges() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create 1 year of data
         let mut provider = InMemoryDataProvider::new();
         let mut test_data = Vec::new();
         for day in 1..=365 {
-            let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day - 1);
+            let date =
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + chrono::Duration::days(day - 1);
             test_data.push(TimeSeriesPoint::new(
                 Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap()),
                 100.0 + (day as f64) * 0.1,
             ));
         }
         provider.add_data(aapl.clone(), test_data);
-        
+
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         // Test 1 day
-        let result = dag.execute_pull_mode(
-            data_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
+        let result = dag
+            .execute_pull_mode(
+                data_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
         assert_eq!(result.len(), 1);
-        
+
         // Test 1 month (30 days)
-        let result = dag.execute_pull_mode(
-            data_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
+        let result = dag
+            .execute_pull_mode(
+                data_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
         assert_eq!(result.len(), 30);
-        
+
         // Test 1 year
-        let result = dag.execute_pull_mode(
-            data_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
+        let result = dag
+            .execute_pull_mode(
+                data_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
         assert_eq!(result.len(), 365);
     }
 
     #[test]
     fn test_integration_returns_matches_analytics_function() {
-        use crate::time_series::InMemoryDataProvider;
         use crate::analytics::calculate_returns;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use crate::time_series::InMemoryDataProvider;
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create test data
         let mut provider = InMemoryDataProvider::new();
         let prices = vec![100.0, 102.0, 101.0, 103.0, 105.0];
-        let test_data: Vec<TimeSeriesPoint> = prices.iter().enumerate().map(|(i, &price)| {
-            TimeSeriesPoint::new(
-                Utc.with_ymd_and_hms(2024, 1, (i + 1) as u32, 0, 0, 0).unwrap(),
-                price,
-            )
-        }).collect();
+        let test_data: Vec<TimeSeriesPoint> = prices
+            .iter()
+            .enumerate()
+            .map(|(i, &price)| {
+                TimeSeriesPoint::new(
+                    Utc.with_ymd_and_hms(2024, 1, (i + 1) as u32, 0, 0, 0)
+                        .unwrap(),
+                    price,
+                )
+            })
+            .collect();
         provider.add_data(aapl.clone(), test_data);
-        
+
         // Set up DAG
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
         let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
         dag.add_edge(data_node, returns_node).unwrap();
-        
+
         // Execute pull-mode
-        let result = dag.execute_pull_mode(
-            returns_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
-        
+        let result = dag
+            .execute_pull_mode(
+                returns_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
+
         // Calculate expected returns using analytics function
         let expected_returns = calculate_returns(&prices);
-        
+
         // Compare (allowing for NaN)
         assert_eq!(result.len(), expected_returns.len());
         for (actual, &expected) in result.iter().zip(expected_returns.iter()) {
@@ -3179,12 +3506,12 @@ mod tests {
     #[test]
     fn test_integration_volatility_various_windows() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
+        use chrono::{NaiveDate, TimeZone, Utc};
         use std::collections::HashMap;
-        
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create test data with 30 days
         let mut provider = InMemoryDataProvider::new();
         let mut test_data = Vec::new();
@@ -3195,31 +3522,42 @@ mod tests {
             ));
         }
         provider.add_data(aapl.clone(), test_data);
-        
+
         // Test different window sizes
         for window_size in vec![5, 10, 20] {
-            let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-            let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-            
+            let data_node = dag.add_node(
+                "DataProvider".to_string(),
+                NodeParams::None,
+                vec![aapl.clone()],
+            );
+            let returns_node =
+                dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
             let mut vol_params = HashMap::new();
             vol_params.insert("window_size".to_string(), window_size.to_string());
-            let vol_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol_params), vec![aapl.clone()]);
-            
+            let vol_node = dag.add_node(
+                "Volatility".to_string(),
+                NodeParams::Map(vol_params),
+                vec![aapl.clone()],
+            );
+
             dag.add_edge(data_node, returns_node).unwrap();
             dag.add_edge(returns_node, vol_node).unwrap();
-            
-            let result = dag.execute_pull_mode(
-                vol_node,
-                DateRange::new(
-                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                    NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
-                ),
-                &provider,
-            ).unwrap();
-            
+
+            let result = dag
+                .execute_pull_mode(
+                    vol_node,
+                    DateRange::new(
+                        NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        NaiveDate::from_ymd_opt(2024, 1, 30).unwrap(),
+                    ),
+                    &provider,
+                )
+                .unwrap();
+
             // Should have 30 volatility values
             assert_eq!(result.len(), 30, "Failed for window size {}", window_size);
-            
+
             // All non-NaN values should be non-negative
             for point in &result {
                 if !point.close_price.is_nan() {
@@ -3232,13 +3570,13 @@ mod tests {
     #[test]
     fn test_integration_complex_dag_multiple_analytics() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
+        use chrono::{NaiveDate, TimeZone, Utc};
         use std::collections::HashMap;
-        
+
         // Build a complex DAG: DataProvider -> Returns -> (Volatility5, Volatility10)
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
         let mut test_data = Vec::new();
         for day in 1..=20 {
@@ -3248,31 +3586,48 @@ mod tests {
             ));
         }
         provider.add_data(aapl.clone(), test_data);
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
-        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
+        let returns_node =
+            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
+
         let mut vol5_params = HashMap::new();
         vol5_params.insert("window_size".to_string(), "5".to_string());
-        let vol5_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol5_params), vec![aapl.clone()]);
-        
+        let vol5_node = dag.add_node(
+            "Volatility".to_string(),
+            NodeParams::Map(vol5_params),
+            vec![aapl.clone()],
+        );
+
         let mut vol10_params = HashMap::new();
         vol10_params.insert("window_size".to_string(), "10".to_string());
-        let vol10_node = dag.add_node("Volatility".to_string(), NodeParams::Map(vol10_params), vec![aapl]);
-        
+        let vol10_node = dag.add_node(
+            "Volatility".to_string(),
+            NodeParams::Map(vol10_params),
+            vec![aapl],
+        );
+
         dag.add_edge(data_node, returns_node).unwrap();
         dag.add_edge(returns_node, vol5_node).unwrap();
         dag.add_edge(returns_node, vol10_node).unwrap();
-        
+
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 1, 20).unwrap(),
         );
-        
+
         // Execute different nodes - should all work
-        let vol5_result = dag.execute_pull_mode(vol5_node, date_range.clone(), &provider).unwrap();
-        let vol10_result = dag.execute_pull_mode(vol10_node, date_range, &provider).unwrap();
-        
+        let vol5_result = dag
+            .execute_pull_mode(vol5_node, date_range.clone(), &provider)
+            .unwrap();
+        let vol10_result = dag
+            .execute_pull_mode(vol10_node, date_range, &provider)
+            .unwrap();
+
         assert_eq!(vol5_result.len(), 20);
         assert_eq!(vol10_result.len(), 20);
     }
@@ -3283,13 +3638,13 @@ mod tests {
     fn test_edge_case_empty_date_range() {
         use crate::time_series::InMemoryDataProvider;
         use chrono::NaiveDate;
-        
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         let provider = InMemoryDataProvider::new();
-        
+
         // Empty range (start > end) - should return empty
         let result = dag.execute_pull_mode(
             data_node,
@@ -3299,7 +3654,7 @@ mod tests {
             ),
             &provider,
         );
-        
+
         // May error or return empty, both are acceptable
         assert!(result.is_err() || result.unwrap().is_empty());
     }
@@ -3307,30 +3662,37 @@ mod tests {
     #[test]
     fn test_edge_case_single_data_point() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
-        let test_data = vec![
-            TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), 100.0),
-        ];
+        let test_data = vec![TimeSeriesPoint::new(
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            100.0,
+        )];
         provider.add_data(aapl.clone(), test_data);
-        
-        let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl.clone()]);
+
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![aapl.clone()],
+        );
         let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
         dag.add_edge(data_node, returns_node).unwrap();
-        
-        let result = dag.execute_pull_mode(
-            returns_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
-        
+
+        let result = dag
+            .execute_pull_mode(
+                returns_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
+
         // Single point should return 1 result (NaN for returns)
         assert_eq!(result.len(), 1);
         assert!(result[0].close_price.is_nan());
@@ -3339,11 +3701,11 @@ mod tests {
     #[test]
     fn test_edge_case_date_range_before_data() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
         // Data starts from Jan 10
         let test_data = vec![
@@ -3351,19 +3713,21 @@ mod tests {
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 11, 0, 0, 0).unwrap(), 101.0),
         ];
         provider.add_data(aapl.clone(), test_data);
-        
+
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         // Request data before availability (Jan 1-5)
-        let result = dag.execute_pull_mode(
-            data_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
-        
+        let result = dag
+            .execute_pull_mode(
+                data_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
+
         // Should return empty (no data in that range)
         assert_eq!(result.len(), 0);
     }
@@ -3371,11 +3735,11 @@ mod tests {
     #[test]
     fn test_edge_case_date_range_after_data() {
         use crate::time_series::InMemoryDataProvider;
-        use chrono::{NaiveDate, Utc, TimeZone};
-        
+        use chrono::{NaiveDate, TimeZone, Utc};
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         let mut provider = InMemoryDataProvider::new();
         // Data ends at Jan 5
         let test_data = vec![
@@ -3383,19 +3747,21 @@ mod tests {
             TimeSeriesPoint::new(Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(), 101.0),
         ];
         provider.add_data(aapl.clone(), test_data);
-        
+
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         // Request data after availability (Jan 10-15)
-        let result = dag.execute_pull_mode(
-            data_node,
-            DateRange::new(
-                NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
-                NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
-            ),
-            &provider,
-        ).unwrap();
-        
+        let result = dag
+            .execute_pull_mode(
+                data_node,
+                DateRange::new(
+                    NaiveDate::from_ymd_opt(2024, 1, 10).unwrap(),
+                    NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+                ),
+                &provider,
+            )
+            .unwrap();
+
         // Should return empty
         assert_eq!(result.len(), 0);
     }
@@ -3404,10 +3770,10 @@ mod tests {
     fn test_error_handling_invalid_node_id() {
         use crate::time_series::InMemoryDataProvider;
         use chrono::NaiveDate;
-        
+
         let dag = AnalyticsDag::new();
         let provider = InMemoryDataProvider::new();
-        
+
         let non_existent_node = NodeId(9999);
         let result = dag.execute_pull_mode(
             non_existent_node,
@@ -3417,7 +3783,7 @@ mod tests {
             ),
             &provider,
         );
-        
+
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), DagError::NodeNotFound(_)));
     }
@@ -3426,15 +3792,15 @@ mod tests {
     fn test_error_handling_provider_failure() {
         use crate::time_series::InMemoryDataProvider;
         use chrono::NaiveDate;
-        
+
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
-        
+
         // Create node but don't provide data - will cause AssetNotFound error
         let data_node = dag.add_node("DataProvider".to_string(), NodeParams::None, vec![aapl]);
-        
+
         let provider = InMemoryDataProvider::new(); // Empty provider
-        
+
         let result = dag.execute_pull_mode(
             data_node,
             DateRange::new(
@@ -3443,12 +3809,14 @@ mod tests {
             ),
             &provider,
         );
-        
+
         assert!(result.is_err());
         // Should be a DataProviderError
         if let Err(e) = result {
-            assert!(format!("{}", e).contains("Asset not found") || 
-                    format!("{}", e).contains("Data provider error"));
+            assert!(
+                format!("{}", e).contains("Asset not found")
+                    || format!("{}", e).contains("Data provider error")
+            );
         }
     }
 }

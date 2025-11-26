@@ -45,4 +45,3 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Add shared state
         .with_state(state)
 }
-

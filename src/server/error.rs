@@ -51,16 +51,12 @@ impl IntoResponse for ApiError {
                 "AssetNotFound",
                 format!("Asset '{}' not found in database", asset),
             ),
-            ApiError::InvalidParameter(msg) => (
-                StatusCode::BAD_REQUEST,
-                "InvalidParameter",
-                msg.clone(),
-            ),
-            ApiError::InvalidDateRange(msg) => (
-                StatusCode::BAD_REQUEST,
-                "InvalidDateRange",
-                msg.clone(),
-            ),
+            ApiError::InvalidParameter(msg) => {
+                (StatusCode::BAD_REQUEST, "InvalidParameter", msg.clone())
+            }
+            ApiError::InvalidDateRange(msg) => {
+                (StatusCode::BAD_REQUEST, "InvalidDateRange", msg.clone())
+            }
             ApiError::ComputationFailed(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ComputationFailed",
@@ -132,4 +128,3 @@ impl From<chrono::ParseError> for ApiError {
         ApiError::InvalidDateRange(format!("Date parse error: {}", err))
     }
 }
-

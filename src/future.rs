@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 /// Expiry calendar for futures contracts.
-/// 
+///
 /// Provides functionality to determine contract rollover dates
 /// and manage expiry calendar information.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,10 +26,10 @@ impl ExpiryCalendar {
     }
 
     /// Calculates the rollover date based on the expiry date and rollover days.
-    /// 
+    ///
     /// # Arguments
     /// * `expiry_date` - The contract expiry date
-    /// 
+    ///
     /// # Returns
     /// Returns the date when the contract should be rolled over.
     pub fn rollover_date(&self, expiry_date: NaiveDate) -> NaiveDate {
@@ -56,7 +56,7 @@ pub struct Future {
 
 impl Future {
     /// Creates a new Future asset.
-    /// 
+    ///
     /// # Arguments
     /// * `series` - The underlying series identifier (e.g., "ES")
     /// * `expiry_date` - The contract expiry date
@@ -66,7 +66,7 @@ impl Future {
     /// * `currency` - The currency code
     /// * `calendar_id` - The expiry calendar identifier
     /// * `rollover_days` - Days before expiry to rollover
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Future)` if valid, or `Err` if invalid.
     pub fn new(
@@ -132,14 +132,14 @@ impl Future {
     }
 
     /// Queries time-series data for this future from a data provider.
-    /// 
+    ///
     /// # Arguments
     /// * `provider` - The data provider to query from (not stored in the asset)
     /// * `date_range` - The date range to query
-    /// 
+    ///
     /// # Returns
     /// Returns `Ok(Vec<TimeSeriesPoint>)` if successful, or an error if the query fails.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the asset is not found in the data provider or if the query fails.
     pub fn get_time_series(
@@ -151,20 +151,20 @@ impl Future {
     }
 
     /// Generates a rolling futures price series from multiple contracts.
-    /// 
+    ///
     /// This method creates a continuous price series by switching between
     /// contracts at the specified rollover points (days before expiry).
-    /// 
+    ///
     /// # Arguments
     /// * `provider` - The data provider to query from
     /// * `contracts` - Vector of futures contracts (ordered by expiry date)
     /// * `date_range` - The date range for the rolling series
     /// * `rollover_days` - Days before expiry to switch to next contract
-    /// 
+    ///
     /// # Returns
     /// Returns a continuous price series with prices from the appropriate contract
     /// at each point in time, switching contracts at rollover dates.
-    /// 
+    ///
     /// # Errors
     /// Returns an error if any contract data cannot be retrieved.
     pub fn generate_rolling_price_series(
@@ -186,8 +186,8 @@ impl Future {
             // Check if we need to rollover to next contract
             while current_contract_idx < contracts.len() - 1 {
                 let current_contract = contracts[current_contract_idx];
-                let rollover_date = current_contract.expiry_date
-                    - chrono::Duration::days(rollover_days as i64);
+                let rollover_date =
+                    current_contract.expiry_date - chrono::Duration::days(rollover_days as i64);
 
                 if current_date >= rollover_date {
                     current_contract_idx += 1;
@@ -199,7 +199,7 @@ impl Future {
             // Get data from current contract for this date
             let contract = contracts[current_contract_idx];
             let single_day_range = DateRange::new(current_date, current_date);
-            
+
             // Handle missing data gracefully - if asset not found or no data, skip this date
             match provider.get_time_series(contract.key(), &single_day_range) {
                 Ok(contract_data) => {
@@ -253,7 +253,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(future.series(), "ES");
         assert_eq!(future.expiry_date(), expiry);
@@ -273,7 +274,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let future2 = future1.clone();
         assert_eq!(future1, future2);
@@ -291,7 +293,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(future.asset_type(), AssetType::Future);
     }
@@ -308,7 +311,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(future.name(), "E-mini S&P 500");
         assert_eq!(future.exchange(), "CME");
@@ -327,7 +331,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let rollover = future.rollover_date();
         let expected_rollover = expiry - chrono::Duration::days(5);
@@ -352,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_future_query_time_series() {
-        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use crate::time_series::{DateRange, InMemoryDataProvider};
         use chrono::{TimeZone, Utc};
 
         let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
@@ -365,7 +370,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut provider = InMemoryDataProvider::new();
         let points = vec![
@@ -402,7 +408,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let json = serde_json::to_string(&future).unwrap();
         let deserialized: Future = serde_json::from_str(&json).unwrap();
@@ -425,7 +432,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let rollover = future.rollover_date();
         let expected = expiry - chrono::Duration::days(5);
@@ -434,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_future_generate_rolling_price_series() {
-        use crate::time_series::{InMemoryDataProvider, DateRange};
+        use crate::time_series::{DateRange, InMemoryDataProvider};
         use chrono::{TimeZone, Utc};
 
         // Create two contracts with different expiry dates
@@ -448,7 +456,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let expiry2 = NaiveDate::from_ymd_opt(2025, 3, 20).unwrap();
         let contract2 = Future::new(
@@ -460,7 +469,8 @@ mod tests {
             "USD",
             "CME",
             5,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut provider = InMemoryDataProvider::new();
 
@@ -501,11 +511,11 @@ mod tests {
             &contracts,
             &date_range,
             5, // 5 days before expiry
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should have prices from both contracts, switching at rollover
         assert!(rolling_series.len() >= 2);
         // Prices should come from appropriate contracts based on rollover date
     }
 }
-

@@ -1,7 +1,7 @@
 use crate::asset_key::AssetKey;
 
 /// Trait for asset type discrimination and common asset behavior.
-/// 
+///
 /// All asset types (Equity, Future) must implement this trait.
 /// This provides a common interface for working with different asset types
 /// while maintaining immutability.
@@ -55,4 +55,3 @@ mod tests {
         assert_ne!(equity_type, future_type);
     }
 }
-
