@@ -8,7 +8,9 @@ use crate::dag::{
 };
 use crate::time_series::{DataProvider, DateRange, TimeSeriesPoint};
 use chrono::{DateTime, Duration, Utc};
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 fn parse_lag_from_map(params: &HashMap<String, String>) -> usize {
     params
@@ -22,6 +24,22 @@ fn parse_window_from_map(params: &HashMap<String, String>) -> usize {
         .get("window_size")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(10)
+}
+
+fn parse_lag_from_params(params: &NodeParams) -> usize {
+    if let NodeParams::Map(ref map) = params {
+        parse_lag_from_map(map)
+    } else {
+        1
+    }
+}
+
+fn parse_window_from_params(params: &NodeParams) -> usize {
+    if let NodeParams::Map(ref map) = params {
+        parse_window_from_map(map)
+    } else {
+        10
+    }
 }
 
 fn params_with_range(analytic_type: &str, range: &DateRange) -> HashMap<String, String> {
@@ -55,6 +73,8 @@ pub trait AnalyticExecutor: Send + Sync {
         timestamp: DateTime<Utc>,
         value: f64,
     ) -> Result<NodeOutput, DagError>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// A trait describing how an analytic node resolves its dependencies.
@@ -208,9 +228,13 @@ struct VolatilityDefinition {
 impl VolatilityDefinition {
     fn new() -> Self {
         VolatilityDefinition {
-            executor: Box::new(WindowedAnalyticExecutor::new(Box::new(
-                StdDevVolatilityPrimitive,
-            ))),
+            executor: Box::new(WindowedAnalyticExecutor::new(
+                AnalyticType::Returns,
+                |node| parse_window_from_params(&node.params),
+                |asset, window, _| {
+                    VolatilityPrimitive::compute(&StdDevVolatilityPrimitive, asset, window)
+                },
+            )),
         }
     }
 }
@@ -292,6 +316,10 @@ impl AnalyticExecutor for DataProviderExecutor {
             timestamp, value,
         )]))
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 struct LagDefinition {
@@ -301,7 +329,17 @@ struct LagDefinition {
 impl LagDefinition {
     fn new() -> Self {
         LagDefinition {
-            executor: Box::new(LagExecutor),
+            executor: Box::new(WindowedAnalyticExecutor::new(
+                AnalyticType::DataProvider,
+                |node| parse_lag_from_params(&node.params) + 1,
+                |_asset, window, window_size| {
+                    if window.len() < window_size {
+                        f64::NAN
+                    } else {
+                        window.first().copied().unwrap_or(f64::NAN)
+                    }
+                },
+            )),
         }
     }
 }
@@ -335,82 +373,6 @@ impl AnalyticDefinition for LagDefinition {
 
     fn executor(&self) -> &dyn AnalyticExecutor {
         self.executor.as_ref()
-    }
-}
-
-struct LagExecutor;
-
-impl LagExecutor {
-    fn lag_from_node(node: &Node) -> usize {
-        if let NodeParams::Map(ref params) = node.params {
-            parse_lag_from_map(params)
-        } else {
-            1
-        }
-    }
-
-    fn build_series(&self, node: &Node, prices: &[TimeSeriesPoint]) -> Vec<TimeSeriesPoint> {
-        let lag = Self::lag_from_node(node);
-        let required = lag + 1;
-        let analytic = FixedLag::new(lag);
-        let mut window = VecDeque::new();
-        let mut result = Vec::with_capacity(prices.len());
-
-        for point in prices {
-            window.push_front(point.close_price);
-            if window.len() > required {
-                window.pop_back();
-            }
-
-            let value = if window.len() == required {
-                let values: Vec<f64> = window.iter().copied().collect();
-                analytic.compute_lagged(&values).unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            };
-
-            result.push(TimeSeriesPoint::new(point.timestamp, value));
-        }
-
-        result
-    }
-}
-
-impl AnalyticExecutor for LagExecutor {
-    fn execute_pull(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _date_range: &DateRange,
-        _provider: &dyn DataProvider,
-    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        let prices = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::DataProvider)
-            .map(|parent| parent.output.as_slice())
-            .ok_or_else(|| {
-                DagError::ExecutionError("Lag node requires input price data".to_string())
-            })?;
-
-        Ok(self.build_series(node, prices))
-    }
-
-    fn execute_push(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _timestamp: DateTime<Utc>,
-        _value: f64,
-    ) -> Result<NodeOutput, DagError> {
-        let prices = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::DataProvider)
-            .map(|parent| parent.output.as_slice())
-            .ok_or_else(|| {
-                DagError::ExecutionError("Lag node requires input price data".to_string())
-            })?;
-
-        Ok(NodeOutput::Single(self.build_series(node, prices)))
     }
 }
 
@@ -582,23 +544,64 @@ impl AnalyticExecutor for ReturnsExecutor {
         let value = self.build_update(asset, price_data, lag_data_slice)?;
         Ok(NodeOutput::Scalar(value))
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 struct WindowedAnalyticExecutor {
-    primitive: Box<dyn VolatilityPrimitive>,
+    source: AnalyticType,
+    window_size_fn: Arc<dyn Fn(&Node) -> usize + Send + Sync>,
+    compute_fn: Arc<dyn Fn(Option<&AssetKey>, &[f64], usize) -> f64 + Send + Sync>,
 }
 
 impl WindowedAnalyticExecutor {
-    fn new(primitive: Box<dyn VolatilityPrimitive>) -> Self {
-        WindowedAnalyticExecutor { primitive }
+    fn new(
+        source: AnalyticType,
+        window_size_fn: impl Fn(&Node) -> usize + Send + Sync + 'static,
+        compute_fn: impl Fn(Option<&AssetKey>, &[f64], usize) -> f64 + Send + Sync + 'static,
+    ) -> Self {
+        WindowedAnalyticExecutor {
+            source,
+            window_size_fn: Arc::new(window_size_fn),
+            compute_fn: Arc::new(compute_fn),
+        }
     }
 
-    fn window_size(node: &Node) -> usize {
-        if let NodeParams::Map(ref params) = node.params {
-            parse_window_from_map(params)
-        } else {
-            10
+    fn extract_values(points: &[TimeSeriesPoint]) -> Vec<f64> {
+        points.iter().map(|p| p.close_price).collect()
+    }
+
+    fn series_for_points(&self, node: &Node, points: &[TimeSeriesPoint]) -> Vec<TimeSeriesPoint> {
+        let window_size = (self.window_size_fn)(node);
+        let values = Self::extract_values(points);
+        let asset = node.assets.first().map(|asset| asset);
+        let mut result = Vec::with_capacity(points.len());
+
+        for (idx, point) in points.iter().enumerate() {
+            let start = idx.saturating_sub(window_size.saturating_sub(1));
+            let window = &values[start..=idx];
+            let value = (self.compute_fn)(asset, window, window_size);
+            result.push(TimeSeriesPoint::new(point.timestamp, value));
         }
+
+        result
+    }
+
+    fn scalar_for_points(&self, node: &Node, points: &[TimeSeriesPoint]) -> Result<f64, DagError> {
+        if points.is_empty() {
+            return Err(DagError::ExecutionError(
+                "Windowed analytic update requires input data".to_string(),
+            ));
+        }
+
+        let window_size = (self.window_size_fn)(node);
+        let values = Self::extract_values(points);
+        let asset = node.assets.first().map(|asset| asset);
+        let start = values.len().saturating_sub(window_size);
+        let window = &values[start..];
+        Ok((self.compute_fn)(asset, window, window_size))
     }
 }
 
@@ -610,36 +613,22 @@ impl AnalyticExecutor for WindowedAnalyticExecutor {
         _date_range: &DateRange,
         _provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        let returns_data = parent_outputs
+        let points = parent_outputs
             .iter()
-            .find(|parent| parent.analytic == AnalyticType::Returns)
+            .find(|parent| parent.analytic == self.source)
             .map(|parent| parent.output.as_slice())
             .ok_or_else(|| {
-                DagError::ExecutionError("Windowed analytic requires input data".to_string())
+                DagError::ExecutionError(format!(
+                    "Windowed analytic requires {} input data",
+                    self.source
+                ))
             })?;
 
-        if returns_data.is_empty() {
+        if points.is_empty() {
             return Ok(Vec::new());
         }
 
-        let window_size = Self::window_size(node);
-        let closes = returns_data
-            .iter()
-            .map(|p| p.close_price)
-            .collect::<Vec<_>>();
-        let asset = node
-            .assets
-            .first()
-            .ok_or_else(|| DagError::ExecutionError("Volatility node missing asset".to_string()))?;
-
-        let mut result = Vec::with_capacity(returns_data.len());
-        for (idx, point) in returns_data.iter().enumerate() {
-            let start = idx.saturating_sub(window_size.saturating_sub(1));
-            let value = self.primitive.compute(Some(asset), &closes[start..=idx]);
-            result.push(TimeSeriesPoint::new(point.timestamp, value));
-        }
-
-        Ok(result)
+        Ok(self.series_for_points(node, points))
     }
 
     fn execute_push(
@@ -649,29 +638,43 @@ impl AnalyticExecutor for WindowedAnalyticExecutor {
         _timestamp: DateTime<Utc>,
         _value: f64,
     ) -> Result<NodeOutput, DagError> {
-        let returns_data = parent_outputs
+        let points = parent_outputs
             .iter()
-            .find(|parent| parent.analytic == AnalyticType::Returns)
+            .find(|parent| parent.analytic == self.source)
             .map(|parent| parent.output.as_slice())
             .ok_or_else(|| {
-                DagError::ExecutionError("Windowed analytic update requires input data".to_string())
+                DagError::ExecutionError(format!(
+                    "Windowed analytic update requires {} input data",
+                    self.source
+                ))
             })?;
 
-        if returns_data.is_empty() {
-            return Err(DagError::ExecutionError(
-                "Windowed analytic update requires input data".to_string(),
-            ));
-        }
-
-        let window_size = Self::window_size(node);
-        let asset = node
-            .assets
-            .first()
-            .ok_or_else(|| DagError::ExecutionError("Volatility node missing asset".to_string()))?;
-
-        let closes: Vec<f64> = returns_data.iter().map(|point| point.close_price).collect();
-        let start = closes.len().saturating_sub(window_size);
-        let value = self.primitive.compute(Some(asset), &closes[start..]);
+        let value = self.scalar_for_points(node, points)?;
         Ok(NodeOutput::Scalar(value))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn lag_and_volatility_use_windowed_executor() {
+        let registry = AnalyticRegistry::new();
+        let lag_exec = registry
+            .definition(AnalyticType::Lag)
+            .expect("Missing lag definition")
+            .executor();
+        assert!(lag_exec.as_any().is::<WindowedAnalyticExecutor>());
+
+        let vol_exec = registry
+            .definition(AnalyticType::Volatility)
+            .expect("Missing volatility definition")
+            .executor();
+        assert!(vol_exec.as_any().is::<WindowedAnalyticExecutor>());
     }
 }
