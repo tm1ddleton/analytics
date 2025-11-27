@@ -6,8 +6,8 @@
 //! - Compare with push-mode (which updates incrementally)
 
 use analytics::{
-    analytics::primitives::{
-        LogReturnPrimitive, ReturnPrimitive, StdDevVolatilityPrimitive, VolatilityPrimitive,
+    analytics::calculators::{
+        LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
     },
     AssetKey, DateRange, VolatilityQueryBuilder,
 };
@@ -59,9 +59,9 @@ fn main() {
     println!("📈 Step 1: Calculate Returns");
     let mut returns = Vec::with_capacity(prices.len());
     returns.push(f64::NAN);
-    let log_primitive = LogReturnPrimitive;
+    let log_analytic = LogReturnAnalytic;
     for window in prices.windows(2) {
-        returns.push(log_primitive.compute(None, window[1], window[0]));
+        returns.push(log_analytic.compute(None, window[1], window[0]));
     }
     println!("   ✓ {} returns calculated", returns.len());
 
@@ -71,10 +71,10 @@ fn main() {
         window_size
     );
     let mut volatility = Vec::with_capacity(returns.len());
-    let vol_primitive = StdDevVolatilityPrimitive;
+    let vol_analytic = StdDevVolatilityAnalytic;
     for (idx, _) in returns.iter().enumerate() {
         let start = idx.saturating_sub(window_size - 1);
-        volatility.push(vol_primitive.compute(None, &returns[start..=idx]));
+        volatility.push(vol_analytic.compute(None, &returns[start..=idx]));
     }
     println!("   ✓ {} volatility points calculated", volatility.len());
 

@@ -101,7 +101,7 @@ impl WindowStrategy for ExponentialWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::super::primitives::ema_step;
+    use super::super::calculators::ema_step;
     use super::ExponentialWindow;
     use super::FixedWindow;
     use super::WindowStrategy;

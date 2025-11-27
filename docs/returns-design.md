@@ -46,20 +46,20 @@ Below is an interface outline that follows the above architecture. A stateless l
 ```rust
 use chrono::{DateTime, Utc};
 
-/// Stateless return primitive plugged into the registry executor.
-pub trait ReturnPrimitive: Send + Sync {
+/// Stateless return analytic plugged into the registry executor.
+pub trait ReturnAnalytic: Send + Sync {
     fn compute(&self, current: f64, lagged: f64) -> f64;
 }
 
 pub struct LogReturn;
-impl ReturnPrimitive for LogReturn {
+impl ReturnAnalytic for LogReturn {
     fn compute(&self, current: f64, lagged: f64) -> f64 {
         (current / lagged).ln()
     }
 }
 
 pub struct ArithReturn;
-impl ReturnPrimitive for ArithReturn {
+impl ReturnAnalytic for ArithReturn {
     fn compute(&self, current: f64, lagged: f64) -> f64 {
         current / lagged - 1.0
     }
@@ -87,7 +87,7 @@ pub trait ReturnExecutor {
         &self,
         current_price: f64,
         lagged_price: f64,
-        primitive: &dyn ReturnPrimitive,
+        primitive: &dyn ReturnAnalytic,
     ) -> f64;
 }
 
@@ -97,7 +97,7 @@ impl ReturnExecutor for DefaultReturnExecutor {
         &self,
         current_price: f64,
         lagged_price: f64,
-        primitive: &dyn ReturnPrimitive,
+        primitive: &dyn ReturnAnalytic,
     ) -> f64 {
         primitive.compute(current_price, lagged_price)
     }

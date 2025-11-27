@@ -25,7 +25,7 @@ Refactor the DAG node model so analytics are expressed as composable, stateless 
 4. Push-mode callbacks, replay, and pull-mode queries share the same `NodeKey` definitions so caching/replay reuse identical nodes.
 5. Override scenarios (arithmetic returns, custom volatility lookbacks) produce distinct keys rather than mutating existing ones; NodeKey encodes analytic type, lag/window, override tag, dates, and assets.
 6. Introduce a calendar node sourced from the data provider that describes the ordered timestamps/working days; analytics use that to extend price queries (e.g., 20-day volatility with overlapping 5-day returns must fetch prices from `T - 25`).
-7. Provide interface traits (`ReturnPrimitive`, `LagAnalytic`, `Windowing layer`, `ReturnExecutor`, `WindowedAnalytic`, `VolatilityExecutor`) so new analytics plug into the registry without manual wiring.
+7. Provide interface traits (`ReturnAnalytic`, `LagAnalytic`, `Windowing layer`, `ReturnExecutor`, `WindowedAnalytic`, `VolatilityExecutor`) so new analytics plug into the registry without manual wiring.
 8. Document the registry/DSL so future primitives can declare dependencies and required history automatically.
 
 ## Visual Assets

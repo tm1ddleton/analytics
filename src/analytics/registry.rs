@@ -1,7 +1,7 @@
-use crate::analytics::lag::{FixedLag, LagAnalytic};
-use crate::analytics::primitives::{
-    LogReturnPrimitive, ReturnPrimitive, StdDevVolatilityPrimitive, VolatilityPrimitive,
+use crate::analytics::calculators::{
+    LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
 };
+use crate::analytics::lag::{FixedLag, LagAnalytic};
 use crate::asset_key::AssetKey;
 use crate::dag::{
     AnalyticType, DagError, Node, NodeId, NodeKey, NodeOutput, NodeParams, WindowSpec,
@@ -171,7 +171,7 @@ struct ReturnsDefinition {
 impl ReturnsDefinition {
     fn new() -> Self {
         ReturnsDefinition {
-            executor: Box::new(ReturnsExecutor::new(Box::new(LogReturnPrimitive))),
+            executor: Box::new(ReturnsExecutor::new(Box::new(LogReturnAnalytic))),
         }
     }
 }
@@ -232,7 +232,8 @@ impl VolatilityDefinition {
                 AnalyticType::Returns,
                 |node| parse_window_from_params(&node.params),
                 |asset, window, _| {
-                    VolatilityPrimitive::compute(&StdDevVolatilityPrimitive, asset, window)
+                    let analytic = StdDevVolatilityAnalytic;
+                    analytic.compute(asset, window)
                 },
             )),
         }
@@ -377,11 +378,11 @@ impl AnalyticDefinition for LagDefinition {
 }
 
 struct ReturnsExecutor {
-    primitive: Box<dyn ReturnPrimitive>,
+    primitive: Box<dyn ReturnAnalytic>,
 }
 
 impl ReturnsExecutor {
-    fn new(primitive: Box<dyn ReturnPrimitive>) -> Self {
+    fn new(primitive: Box<dyn ReturnAnalytic>) -> Self {
         ReturnsExecutor { primitive }
     }
 

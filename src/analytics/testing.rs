@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
-use crate::analytics::primitives::{
-    LogReturnPrimitive, ReturnPrimitive, StdDevVolatilityPrimitive, VolatilityPrimitive,
+use crate::analytics::calculators::{
+    LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
 };
 use crate::time_series::TimeSeriesPoint;
 
 /// Test helper: computes log returns across adjacent prices.
 pub(crate) fn calculate_returns(prices: &[f64]) -> Vec<f64> {
-    let primitive = LogReturnPrimitive;
+    let primitive = LogReturnAnalytic;
     if prices.is_empty() {
         return Vec::new();
     }
@@ -29,7 +29,7 @@ pub(crate) fn calculate_volatility(returns: &[f64], window_size: usize) -> Vec<f
         return Vec::new();
     }
 
-    let primitive = StdDevVolatilityPrimitive;
+    let primitive = StdDevVolatilityAnalytic;
     returns
         .iter()
         .enumerate()
@@ -46,7 +46,7 @@ pub(crate) fn calculate_returns_update(prices: &[TimeSeriesPoint]) -> f64 {
         return f64::NAN;
     }
 
-    let primitive = LogReturnPrimitive;
+    let primitive = LogReturnAnalytic;
     let current = prices.last().unwrap().close_price;
     let lagged = prices[prices.len() - 2].close_price;
     primitive.compute(None, current, lagged)
@@ -58,7 +58,7 @@ pub(crate) fn calculate_volatility_update(returns: &[TimeSeriesPoint], window_si
         return f64::NAN;
     }
 
-    let primitive = StdDevVolatilityPrimitive;
+    let primitive = StdDevVolatilityAnalytic;
     let closes: Vec<f64> = returns.iter().map(|point| point.close_price).collect();
     let start = closes.len().saturating_sub(window_size);
     primitive.compute(None, &closes[start..])

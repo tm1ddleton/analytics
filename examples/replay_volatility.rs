@@ -9,7 +9,7 @@
 //! Run with: cargo run --example replay_volatility
 
 use analytics::{
-    analytics::primitives::{StdDevVolatilityPrimitive, VolatilityPrimitive},
+    analytics::calculators::{StdDevVolatilityAnalytic, VolatilityAnalytic},
     AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
 };
 use chrono::{NaiveDate, TimeZone, Utc};
@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_sizes = vec![5usize, 10, 20];
 
     for window in window_sizes {
-        let primitive = StdDevVolatilityPrimitive;
+        let primitive = StdDevVolatilityAnalytic;
         let mut volatility = Vec::with_capacity(collected_prices.len());
         for (idx, _) in collected_prices.iter().enumerate() {
             let start = idx.saturating_sub(window.saturating_sub(1));

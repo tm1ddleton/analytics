@@ -4,8 +4,8 @@
 //! returns and volatility calculations. These functions operate on raw f64
 //! arrays for performance and are designed to integrate with the DAG framework.
 
+pub mod calculators;
 mod lag;
-pub mod primitives;
 pub mod registry;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -14,7 +14,7 @@ mod windows;
 use crate::asset_key::AssetKey;
 use crate::dag::{DagError, NodeId, NodeParams};
 use crate::time_series::{DateRange, TimeSeriesPoint};
-use primitives::ema_step;
+use calculators::ema_step;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -50,10 +50,10 @@ pub enum OutputMode {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::primitives::{LogReturnPrimitive, ReturnPrimitive};
+/// use analytics::analytics::calculators::{LogReturnAnalytic, ReturnAnalytic};
 ///
-/// let primitive = LogReturnPrimitive;
-/// let returns = ReturnPrimitive::compute(&primitive, None, 105.0, 100.0);
+/// let primitive = LogReturnAnalytic;
+/// let returns = ReturnAnalytic::compute(&primitive, None, 105.0, 100.0);
 /// let expected = (105.0_f64 / 100.0).ln();
 ///
 /// assert!((returns - expected).abs() < 1e-10);
@@ -80,10 +80,10 @@ pub enum OutputMode {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::primitives::{StdDevVolatilityPrimitive, VolatilityPrimitive};
+/// use analytics::analytics::calculators::{StdDevVolatilityAnalytic, VolatilityAnalytic};
 ///
-/// let primitive = StdDevVolatilityPrimitive;
-/// let value = VolatilityPrimitive::compute(&primitive, None, &[0.01, -0.02, 0.015]);
+/// let primitive = StdDevVolatilityAnalytic;
+/// let value = VolatilityAnalytic::compute(&primitive, None, &[0.01, -0.02, 0.015]);
 /// assert!(value >= 0.0);
 /// ```
 /// Calculates the latest update value for returns based on available price points.
