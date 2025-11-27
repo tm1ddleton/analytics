@@ -51,7 +51,7 @@ fn main() {
     engine
         .register_callback(
             vol_node,
-            Box::new(move |output| {
+            Box::new(move |_, output, _| {
                 if let NodeOutput::Single(points) = output {
                     if let Some(last_point) = points.last() {
                         vol_updates_clone

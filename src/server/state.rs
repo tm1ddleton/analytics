@@ -88,4 +88,8 @@ pub struct AnalyticConfig {
     /// Parameters for the analytic
     #[serde(default)]
     pub parameters: HashMap<String, String>,
+    /// Optional override tag that customizes caching behavior
+    #[serde(rename = "override")]
+    #[serde(default)]
+    pub override_tag: Option<String>,
 }

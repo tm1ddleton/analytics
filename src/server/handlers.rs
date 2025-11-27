@@ -215,13 +215,58 @@ pub async fn get_asset_data(
 
 // Task Group 5: Pull-Mode Analytics Endpoints
 
+fn build_node_key(
+    asset: &AssetKey,
+    analytic: AnalyticType,
+    date_range: &DateRange,
+    params: &HashMap<String, String>,
+    override_tag: Option<String>,
+) -> Result<NodeKey, ApiError> {
+    let mut node_params = params.clone();
+
+    let window_spec = match analytic {
+        AnalyticType::Volatility => {
+            let window_size = node_params
+                .get("window")
+                .or_else(|| node_params.get("window_size"))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(10);
+
+            if window_size == 0 {
+                return Err(ApiError::InvalidParameter(
+                    "Window size must be greater than 0".to_string(),
+                ));
+            }
+
+            node_params.insert("window_size".to_string(), window_size.to_string());
+            Some(WindowSpec::fixed(window_size))
+        }
+        AnalyticType::Returns => Some(WindowSpec::fixed(2)),
+        _ => None,
+    };
+
+    if let Some(tag) = &override_tag {
+        node_params.insert("override".to_string(), tag.clone());
+    }
+
+    Ok(NodeKey {
+        analytic,
+        assets: vec![asset.clone()],
+        range: Some(date_range.clone()),
+        window: window_spec,
+        override_tag,
+        params: node_params,
+    })
+}
+
 /// Helper function to build analytics DAG
 fn build_analytics_dag(
     asset: &AssetKey,
     analytic_type: &str,
     date_range: &DateRange,
     params: &HashMap<String, String>,
-) -> Result<(AnalyticsDag, NodeId), ApiError> {
+    override_tag: Option<String>,
+) -> Result<(AnalyticsDag, NodeId, NodeKey), ApiError> {
     let analytic = AnalyticType::from_str(analytic_type);
     let registry = AnalyticRegistry::default();
 
@@ -232,41 +277,14 @@ fn build_analytics_dag(
         )));
     }
 
-    let mut node_params = params.clone();
-    let window_param = params
-        .get("window")
-        .and_then(|value| value.parse::<usize>().ok());
-
-    let window_spec = match analytic {
-        AnalyticType::Volatility => {
-            let window_size = window_param.unwrap_or(10);
-            if window_size == 0 {
-                return Err(ApiError::InvalidParameter(
-                    "Window size must be greater than 0".to_string(),
-                ));
-            }
-            node_params.insert("window_size".to_string(), window_size.to_string());
-            Some(WindowSpec::fixed(window_size))
-        }
-        AnalyticType::Returns => Some(WindowSpec::fixed(2)),
-        _ => None,
-    };
-
-    let node_key = NodeKey {
-        analytic,
-        assets: vec![asset.clone()],
-        range: Some(date_range.clone()),
-        window: window_spec,
-        override_tag: None,
-        params: node_params,
-    };
+    let node_key = build_node_key(asset, analytic, date_range, params, override_tag)?;
 
     let mut dag = AnalyticsDag::new();
     let target_node = dag
-        .resolve_node(node_key)
+        .resolve_node(node_key.clone())
         .map_err(|e| ApiError::ComputationFailed(e.to_string()))?;
 
-    Ok((dag, target_node))
+    Ok((dag, target_node, node_key))
 }
 
 /// Query parameters for analytics endpoint
@@ -275,6 +293,8 @@ pub struct AnalyticsQueryParams {
     pub start: String,
     pub end: String,
     pub window: Option<usize>,
+    #[serde(rename = "override")]
+    pub override_tag: Option<String>,
 }
 
 /// Single data point in analytics response
@@ -323,12 +343,21 @@ pub async fn get_analytics(
     if let Some(window) = query_params.window {
         params.insert("window".to_string(), window.to_string());
     }
+    if let Some(tag) = &query_params.override_tag {
+        params.insert("override".to_string(), tag.clone());
+    }
 
     // Create date range
     let date_range = DateRange::new(start_date, end_date);
 
     // Build DAG
-    let (dag, target_node) = build_analytics_dag(&asset_key, &analytic_type, &date_range, &params)?;
+    let (dag, target_node, _) = build_analytics_dag(
+        &asset_key,
+        &analytic_type,
+        &date_range,
+        &params,
+        query_params.override_tag.clone(),
+    )?;
 
     // Execute pull-mode query
     let provider = state.data_provider.lock().await;
@@ -374,6 +403,9 @@ pub struct BatchQuery {
     pub end_date: String,
     #[serde(default)]
     pub parameters: HashMap<String, String>,
+    #[serde(rename = "override")]
+    #[serde(default)]
+    pub override_tag: Option<String>,
 }
 
 /// Response for batch query
@@ -432,9 +464,20 @@ async fn execute_single_batch_query(
     // Create date range
     let date_range = DateRange::new(start_date, end_date);
 
+    // Prepare parameters (include override tag)
+    let mut params = query.parameters.clone();
+    if let Some(tag) = &query.override_tag {
+        params.insert("override".to_string(), tag.clone());
+    }
+
     // Build DAG
-    let (dag, target_node) =
-        build_analytics_dag(&asset_key, &query.analytic, &date_range, &query.parameters)?;
+    let (dag, target_node, _) = build_analytics_dag(
+        &asset_key,
+        &query.analytic,
+        &date_range,
+        &params,
+        query.override_tag.clone(),
+    )?;
 
     // Execute pull-mode query
     let provider = state.data_provider.lock().await;
@@ -458,7 +501,7 @@ async fn execute_single_batch_query(
     Ok(AnalyticsResponse {
         asset: query.asset,
         analytic: query.analytic,
-        parameters: query.parameters,
+        parameters: params,
         start_date: query.start_date,
         end_date: query.end_date,
         data,
@@ -700,16 +743,24 @@ pub async fn handle_stream(
                 for (key, value) in &analytic.parameters {
                     params.insert(key.clone(), value.clone());
                 }
+                if let Some(tag) = &analytic.override_tag {
+                    params.insert("override".to_string(), tag.clone());
+                }
 
                 // Build DAG for this asset and analytic
-                let dag_result =
-                    build_analytics_dag(asset_key, &analytic.analytic_type, &replay_range, &params);
+                let dag_result = build_analytics_dag(
+                    asset_key,
+                    &analytic.analytic_type,
+                    &replay_range,
+                    &params,
+                    analytic.override_tag.clone(),
+                );
                 if let Err(e) = dag_result {
                     tracing::error!("Replay: Failed to build DAG: {}", e);
                     continue;
                 }
 
-                let (dag, target_node) = dag_result.unwrap();
+                let (dag, target_node, _) = dag_result.unwrap();
 
                 // Create push-mode engine
                 let mut push_engine = PushModeEngine::new(dag);
@@ -845,4 +896,38 @@ pub async fn handle_stream(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asset_key::AssetKey;
+    use crate::dag::AnalyticType;
+    use crate::time_series::DateRange;
+    use chrono::NaiveDate;
+    use std::collections::HashMap;
+
+    #[test]
+    fn build_node_key_override_tag_is_distinct() {
+        let asset = AssetKey::new_equity("AAPL").unwrap();
+        let params = HashMap::new();
+        let range = DateRange::new(
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+        );
+
+        let base_key =
+            build_node_key(&asset, AnalyticType::Returns, &range, &params, None).unwrap();
+        let override_key = build_node_key(
+            &asset,
+            AnalyticType::Returns,
+            &range,
+            &params,
+            Some("arith".to_string()),
+        )
+        .unwrap();
+
+        assert_ne!(base_key, override_key);
+        assert!(override_key.override_tag.as_deref() == Some("arith"));
+    }
 }

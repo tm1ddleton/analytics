@@ -43,7 +43,7 @@ fn main() {
     engine
         .register_callback(
             returns_node,
-            Box::new(move |output| {
+            Box::new(move |_, output, _| {
                 if let NodeOutput::Single(points) = output {
                     let mut count = returns_count_clone.lock().unwrap();
                     *count += points.len();
