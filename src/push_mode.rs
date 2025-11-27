@@ -4,6 +4,7 @@
 //! automatically update when new data arrives, propagating changes through
 //! the DAG dependency chain.
 
+use crate::analytics::registry::ParentOutput;
 use crate::asset_key::AssetKey;
 use crate::dag::{AnalyticsDag, Node, NodeId, NodeOutput, NodeParams};
 use crate::time_series::{DataProvider, DataProviderError, TimeSeriesPoint};
@@ -505,10 +506,7 @@ impl PushModeEngine {
     ///
     /// # Returns
     /// Vector of NodeOutput from each parent
-    fn get_parent_histories(
-        &self,
-        node_id: NodeId,
-    ) -> Result<Vec<Vec<TimeSeriesPoint>>, PushError> {
+    fn get_parent_histories(&self, node_id: NodeId) -> Result<Vec<ParentOutput>, PushError> {
         let parent_ids = self.dag.get_parents(node_id);
 
         let mut outputs = Vec::new();
@@ -517,7 +515,11 @@ impl PushModeEngine {
             if let Some(parent_state) = self.node_states.get(&parent_id) {
                 let history = parent_state.get_history().to_vec();
                 if !history.is_empty() {
-                    outputs.push(history);
+                    outputs.push(ParentOutput {
+                        node_id: parent_id,
+                        analytic: self.dag.analytic_type_for_node(parent_id),
+                        output: history,
+                    });
                 }
             }
         }

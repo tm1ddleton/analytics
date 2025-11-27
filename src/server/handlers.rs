@@ -241,9 +241,17 @@ fn build_node_key(
             node_params.insert("window_size".to_string(), window_size.to_string());
             Some(WindowSpec::fixed(window_size))
         }
-        AnalyticType::Returns => Some(WindowSpec::fixed(2)),
         _ => None,
     };
+
+    if analytic == AnalyticType::Returns {
+        let lag = node_params
+            .get("lag")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&lag| lag > 0)
+            .unwrap_or(1);
+        node_params.insert("lag".to_string(), lag.to_string());
+    }
 
     if let Some(tag) = &override_tag {
         node_params.insert("override".to_string(), tag.clone());

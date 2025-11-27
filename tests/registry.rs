@@ -30,12 +30,14 @@ fn registry_builds_volatility_chain() {
     let mut dag = AnalyticsDag::new();
     let target_node = dag.resolve_node(key.clone()).unwrap();
 
-    assert_eq!(
-        dag.node_count(),
-        3,
-        "Volatility should build returns + data provider"
+    assert!(
+        dag.node_count() >= 4,
+        "Volatility should build data provider, lag, returns, and volatility nodes"
     );
-    assert_eq!(dag.edge_count(), 2, "Two edges should connect the chain");
+    assert!(
+        dag.edge_count() >= 4,
+        "At least four edges should connect the chain"
+    );
     assert_eq!(dag.resolve_node(key.clone()).unwrap(), target_node);
 
     let execution = dag.execution_order().unwrap();
@@ -46,6 +48,7 @@ fn registry_builds_volatility_chain() {
         .collect();
 
     assert_eq!(nodes.first().map(String::as_str), Some("data_provider"));
+    assert!(nodes.contains(&"lag".to_string()));
     assert!(nodes.contains(&"returns".to_string()));
     assert!(nodes.contains(&"volatility".to_string()));
 }

@@ -200,27 +200,10 @@ impl VolatilityQueryBuilder {
         &self,
     ) -> Result<(crate::dag::AnalyticsDag, NodeId, NodeId, NodeId), DagError> {
         use crate::dag::AnalyticsDag;
-        use chrono::Duration;
 
-        let mut dag = AnalyticsDag::new();
-
-        // Calculate burn-in: N-day volatility needs N+1 days of price data
-        let burnin_days = calculate_volatility_burnin(self.window_size);
-
-        // Adjust start date for burn-in
-        let adjusted_start = self.date_range.start - Duration::days(burnin_days as i64);
-        let adjusted_range = DateRange::new(adjusted_start, self.date_range.end);
-
-        // Create nodes (node creation helpers are no longer needed, we build directly)
-        let mut data_params = HashMap::new();
-        data_params.insert("analytic_type".to_string(), "data_provider".to_string());
-        data_params.insert("start_date".to_string(), adjusted_range.start.to_string());
-        data_params.insert("end_date".to_string(), adjusted_range.end.to_string());
-
-        let mut returns_params = HashMap::new();
-        returns_params.insert("analytic_type".to_string(), "returns".to_string());
-        returns_params.insert("start_date".to_string(), adjusted_range.start.to_string());
-        returns_params.insert("end_date".to_string(), adjusted_range.end.to_string());
+        let builder = ReturnsQueryBuilder::new(self.asset.clone(), self.date_range.clone())
+            .with_additional_burn_in(self.window_size);
+        let (mut dag, data_node_id, returns_node_id) = builder.build_dag()?;
 
         let mut volatility_params = HashMap::new();
         volatility_params.insert("analytic_type".to_string(), "volatility".to_string());
@@ -228,29 +211,13 @@ impl VolatilityQueryBuilder {
         volatility_params.insert("start_date".to_string(), self.date_range.start.to_string());
         volatility_params.insert("end_date".to_string(), self.date_range.end.to_string());
 
-        // Add nodes to DAG (add_node returns the NodeId)
-        let data_node_id = dag.add_node(
-            "data_provider".to_string(),
-            NodeParams::Map(data_params),
-            vec![self.asset.clone()],
-        );
-
-        let returns_node_id = dag.add_node(
-            "returns".to_string(),
-            NodeParams::Map(returns_params),
-            vec![self.asset.clone()],
-        );
-
         let volatility_node_id = dag.add_node(
             "volatility".to_string(),
             NodeParams::Map(volatility_params),
             vec![self.asset.clone()],
         );
 
-        // Create edges: data → returns → volatility
-        dag.add_edge(data_node_id, returns_node_id)?;
         dag.add_edge(returns_node_id, volatility_node_id)?;
-
         Ok((dag, data_node_id, returns_node_id, volatility_node_id))
     }
 }
@@ -262,12 +229,22 @@ impl VolatilityQueryBuilder {
 pub struct ReturnsQueryBuilder {
     asset: AssetKey,
     date_range: DateRange,
+    additional_burn_in: usize,
 }
 
 impl ReturnsQueryBuilder {
     /// Creates a new returns query builder
     pub fn new(asset: AssetKey, date_range: DateRange) -> Self {
-        ReturnsQueryBuilder { asset, date_range }
+        ReturnsQueryBuilder {
+            asset,
+            date_range,
+            additional_burn_in: 0,
+        }
+    }
+
+    pub fn with_additional_burn_in(mut self, extra: usize) -> Self {
+        self.additional_burn_in = extra;
+        self
     }
 
     /// Builds the DAG with automatic burn-in calculation
@@ -280,10 +257,10 @@ impl ReturnsQueryBuilder {
         let mut dag = AnalyticsDag::new();
 
         // Returns need 1 extra day for first return calculation
-        let burnin_days = 1;
+        let burnin_days = 1 + self.additional_burn_in;
 
         // Adjust start date for burn-in
-        let adjusted_start = self.date_range.start - Duration::days(burnin_days);
+        let adjusted_start = self.date_range.start - Duration::days(burnin_days as i64);
         let adjusted_range = DateRange::new(adjusted_start, self.date_range.end);
 
         // Create node parameters
@@ -293,14 +270,28 @@ impl ReturnsQueryBuilder {
         data_params.insert("end_date".to_string(), adjusted_range.end.to_string());
 
         let mut returns_params = HashMap::new();
+        let lag_value = 1;
         returns_params.insert("analytic_type".to_string(), "returns".to_string());
         returns_params.insert("start_date".to_string(), self.date_range.start.to_string());
         returns_params.insert("end_date".to_string(), self.date_range.end.to_string());
+        returns_params.insert("lag".to_string(), lag_value.to_string());
+
+        let mut lag_params = HashMap::new();
+        lag_params.insert("analytic_type".to_string(), "lag".to_string());
+        lag_params.insert("start_date".to_string(), adjusted_range.start.to_string());
+        lag_params.insert("end_date".to_string(), adjusted_range.end.to_string());
+        lag_params.insert("lag".to_string(), lag_value.to_string());
 
         // Add nodes to DAG (add_node returns the NodeId)
         let data_node_id = dag.add_node(
             "data_provider".to_string(),
             NodeParams::Map(data_params),
+            vec![self.asset.clone()],
+        );
+
+        let lag_node_id = dag.add_node(
+            "lag".to_string(),
+            NodeParams::Map(lag_params),
             vec![self.asset.clone()],
         );
 
@@ -310,8 +301,10 @@ impl ReturnsQueryBuilder {
             vec![self.asset.clone()],
         );
 
-        // Create edge: data → returns
+        // Create edges: data → lag → returns, plus data → returns so both parents exist
+        dag.add_edge(data_node_id, lag_node_id)?;
         dag.add_edge(data_node_id, returns_node_id)?;
+        dag.add_edge(lag_node_id, returns_node_id)?;
 
         Ok((dag, data_node_id, returns_node_id))
     }
@@ -696,8 +689,8 @@ mod tests {
         let builder = ReturnsQueryBuilder::new(asset, date_range);
         let (dag, data_node_id, returns_node_id) = builder.build_dag().unwrap();
 
-        // Verify DAG has 2 nodes
-        assert!(dag.node_count() >= 2, "DAG should have at least 2 nodes");
+        // Verify DAG has 3 nodes (data, lag, returns)
+        assert!(dag.node_count() >= 3, "DAG should have at least 3 nodes");
 
         // Verify execution order includes both nodes
         let exec_order = dag.execution_order_immutable().unwrap();
@@ -717,6 +710,21 @@ mod tests {
             data_pos < returns_pos,
             "Data node should come before returns node"
         );
+
+        // Verify lag node exists between data and returns
+        let lag_pos = exec_order
+            .iter()
+            .position(|&id| {
+                dag.get_node(id)
+                    .map(|node| node.node_type == "lag")
+                    .unwrap_or(false)
+            })
+            .expect("Lag node should exist");
+
+        assert!(
+            data_pos < lag_pos && lag_pos < returns_pos,
+            "Data should precede lag which should precede returns"
+        );
     }
 
     #[test]
@@ -733,8 +741,8 @@ mod tests {
         let builder = VolatilityQueryBuilder::new(asset, window_size, date_range);
         let (dag, data_node_id, returns_node_id, volatility_node_id) = builder.build_dag().unwrap();
 
-        // Verify DAG has 3 nodes
-        assert!(dag.node_count() >= 3, "DAG should have at least 3 nodes");
+        // Verify DAG has 4 nodes (data, lag, returns, volatility)
+        assert!(dag.node_count() >= 4, "DAG should have at least 4 nodes");
 
         // Verify execution order includes all three nodes
         let exec_order = dag.execution_order_immutable().unwrap();
@@ -756,9 +764,19 @@ mod tests {
             .position(|&id| id == volatility_node_id)
             .unwrap();
 
+        let lag_pos = exec_order
+            .iter()
+            .position(|&id| {
+                dag.get_node(id)
+                    .map(|node| node.node_type == "lag")
+                    .unwrap_or(false)
+            })
+            .expect("Lag node should exist");
+
+        assert!(data_pos < lag_pos, "Data node should come before lag node");
         assert!(
-            data_pos < returns_pos,
-            "Data node should come before returns node"
+            lag_pos < returns_pos,
+            "Lag node should come before returns node"
         );
         assert!(
             returns_pos < vol_pos,
@@ -809,8 +827,8 @@ mod tests {
         let exec_order = dag.execution_order_immutable();
         assert!(exec_order.is_ok(), "DAG should be acyclic");
 
-        // Verify all nodes can be executed in order
-        assert_eq!(exec_order.unwrap().len(), 3);
+        // Verify all nodes can be executed in order (data, lag, returns, volatility)
+        assert_eq!(exec_order.unwrap().len(), 4);
     }
 
     #[test]
@@ -830,9 +848,9 @@ mod tests {
         let builder2 = VolatilityQueryBuilder::new(asset, 30, date_range);
         let (dag2, _, _, _) = builder2.build_dag().unwrap();
 
-        // Both DAGs should have 3 nodes (data provider, returns, volatility)
-        assert_eq!(dag1.node_count(), 3);
-        assert_eq!(dag2.node_count(), 3);
+        // Both DAGs should have 4 nodes (data, lag, returns, volatility)
+        assert_eq!(dag1.node_count(), 4);
+        assert_eq!(dag2.node_count(), 4);
 
         // Different window sizes create different DAGs
         // (In practice, these would be separate queries with different burn-in requirements)
@@ -968,15 +986,15 @@ mod tests {
         let builder = VolatilityQueryBuilder::new(asset, window_size, date_range);
         let (dag, _, _, vol_node) = builder.build_dag().unwrap();
 
-        // Verify DAG structure
-        assert_eq!(dag.node_count(), 3);
+        // Verify DAG structure (data, lag, returns, volatility)
+        assert_eq!(dag.node_count(), 4);
 
         // Verify execution order is valid
         let exec_order = dag.execution_order_immutable().unwrap();
-        assert_eq!(exec_order.len(), 3);
+        assert_eq!(exec_order.len(), 4);
 
         // Verify volatility node is last in execution order
-        assert_eq!(exec_order[2], vol_node);
+        assert_eq!(exec_order[3], vol_node);
     }
 
     #[test]
@@ -994,14 +1012,14 @@ mod tests {
         let (dag, _, returns_node) = builder.build_dag().unwrap();
 
         // Verify DAG structure
-        assert_eq!(dag.node_count(), 2);
+        assert_eq!(dag.node_count(), 3);
 
         // Verify execution order is valid
         let exec_order = dag.execution_order_immutable().unwrap();
-        assert_eq!(exec_order.len(), 2);
+        assert_eq!(exec_order.len(), 3);
 
         // Verify returns node is last in execution order
-        assert_eq!(exec_order[1], returns_node);
+        assert_eq!(exec_order[2], returns_node);
     }
 
     #[test]

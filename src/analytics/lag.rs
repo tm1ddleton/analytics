@@ -13,3 +13,20 @@ pub trait LagAnalytic {
         values.get(self.lag()).copied()
     }
 }
+
+/// Simple fixed lag analytic that uses a static lag distance.
+pub struct FixedLag {
+    lag: usize,
+}
+
+impl FixedLag {
+    pub fn new(lag: usize) -> Self {
+        FixedLag { lag }
+    }
+}
+
+impl LagAnalytic for FixedLag {
+    fn lag(&self) -> usize {
+        self.lag
+    }
+}

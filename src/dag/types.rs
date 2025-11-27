@@ -22,6 +22,7 @@ pub enum NodeParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnalyticType {
     DataProvider,
+    Lag,
     Returns,
     Volatility,
     StdDev,
@@ -31,6 +32,7 @@ pub enum AnalyticType {
 impl AnalyticType {
     pub fn from_str(value: &str) -> Self {
         match value.to_lowercase().as_str() {
+            "lag" => AnalyticType::Lag,
             "returns" => AnalyticType::Returns,
             "volatility" => AnalyticType::Volatility,
             "std_dev" | "stddev" => AnalyticType::StdDev,
@@ -46,6 +48,7 @@ impl std::fmt::Display for AnalyticType {
             AnalyticType::DataProvider => "data_provider",
             AnalyticType::Returns => "returns",
             AnalyticType::Volatility => "volatility",
+            AnalyticType::Lag => "lag",
             AnalyticType::StdDev => "std_dev",
             AnalyticType::ExponentialMovingAverage => "ema",
         };

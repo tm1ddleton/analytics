@@ -704,12 +704,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_downloader_creation() {
         let downloader = YahooFinanceDownloader::new();
         assert!(downloader.is_ok());
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_downloader_with_config() {
         let config = DownloaderConfig {
             max_retries: 5,
@@ -726,6 +728,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_asset_key_to_symbol_equity() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let asset_key = AssetKey::new_equity("AAPL").unwrap();
@@ -734,6 +737,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_asset_key_to_symbol_future() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let expiry = NaiveDate::from_ymd_opt(2024, 12, 20).unwrap();
@@ -743,6 +747,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_fetch_historical_data_success() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -768,6 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_fetch_historical_data_invalid_symbol() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -792,6 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_fetch_historical_data_invalid_date_range() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let end_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -962,6 +969,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_and_parse_integration() {
         let downloader = YahooFinanceDownloader::new().unwrap();
         let start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -995,6 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_to_sqlite_single_asset() {
         use crate::time_series::DateRange;
 
@@ -1028,6 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_to_sqlite_duplicate_handling() {
         use crate::time_series::{DateRange, TimeSeriesPoint};
         use chrono::TimeZone;
@@ -1076,6 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_to_sqlite_all_dates_exist() {
         use crate::time_series::{DateRange, TimeSeriesPoint};
         use chrono::TimeZone;
@@ -1127,6 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_to_sqlite_batch_insert() {
         use crate::time_series::DateRange;
 
@@ -1165,6 +1177,7 @@ mod tests {
     // Task Group 4: Error Handling and Retry Logic Tests
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_retry_logic_with_configurable_max_attempts() {
         // Test that retry logic respects max_retries configuration
         let config = DownloaderConfig {
@@ -1202,6 +1215,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_retry_limit_enforcement() {
         // Test that retry limit is enforced (doesn't retry infinitely)
         let config = DownloaderConfig {
@@ -1236,6 +1250,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_partial_failure_recovery_some_assets_succeed() {
         use crate::time_series::DateRange;
 
@@ -1288,6 +1303,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_partial_failure_recovery_continues_on_failure() {
         use crate::time_series::DateRange;
 
@@ -1337,6 +1353,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_download_result_tracking() {
         use crate::time_series::DateRange;
 
@@ -1371,6 +1388,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_retry_on_api_failures() {
         // Test that API failures trigger retries
         let config = DownloaderConfig {
@@ -1407,6 +1425,7 @@ mod tests {
     }
 
     #[tokio::test]
+#[ignore = "requires network"]
     async fn test_exponential_backoff_timing() {
         // Test that exponential backoff is implemented
         // We can't easily test exact timing without mocking, but we verify

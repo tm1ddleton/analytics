@@ -4,7 +4,7 @@
 //! for wiring analytics dependencies explicitly with cycle detection, topological sorting,
 //! and parallel execution support.
 
-use crate::analytics::registry::{AnalyticExecutor, AnalyticRegistry};
+use crate::analytics::registry::{AnalyticExecutor, AnalyticRegistry, ParentOutput};
 use crate::asset_key::AssetKey;
 use crate::dag::types::{Node, NodeId, NodeKey, NodeOutput, NodeParams};
 use crate::dag::AnalyticType;
@@ -56,10 +56,14 @@ impl AnalyticsDag {
 
         for point in data_points {
             for &node_id in nodes_to_execute {
-                let parent_histories: Vec<Vec<TimeSeriesPoint>> = self
+                let parent_histories: Vec<ParentOutput> = self
                     .get_parents(node_id)
                     .iter()
-                    .map(|&parent_id| push_history.get(&parent_id).cloned().unwrap_or_default())
+                    .map(|&parent_id| ParentOutput {
+                        node_id: parent_id,
+                        analytic: self.analytic_type_for_node(parent_id),
+                        output: push_history.get(&parent_id).cloned().unwrap_or_default(),
+                    })
                     .collect();
 
                 let output = match self.execute_push_node(
@@ -114,6 +118,7 @@ impl AnalyticsDag {
             DagError::ExecutionError(msg) if {
                 msg.contains("requires at least two price points")
                     || msg.contains("requires returns data")
+                    || msg.contains("requires input price and lagged values")
             }
         )
     }
@@ -126,6 +131,16 @@ impl AnalyticsDag {
             lower == "data_provider" || lower == "dataprovider"
         } else {
             false
+        }
+    }
+
+    pub(crate) fn analytic_type_for_node(&self, node_id: NodeId) -> AnalyticType {
+        if let Some(key) = self.node_key(node_id) {
+            key.analytic
+        } else if let Some(node) = self.get_node(node_id) {
+            AnalyticType::from_str(&node.node_type)
+        } else {
+            AnalyticType::DataProvider
         }
     }
 }
@@ -945,15 +960,24 @@ impl AnalyticsDag {
 
         match node.node_type.as_str() {
             "Returns" => {
-                // Returns needs 1 extra day of prices
-                // Recursively get parent burn-in
+                let lag = Self::parse_lag_from_node(&node);
                 let parent_burnin: usize = self
                     .get_parents(node_id)
                     .iter()
                     .map(|&parent_id| self.calculate_burnin_days(parent_id))
                     .max()
                     .unwrap_or(0);
-                parent_burnin + 1
+                parent_burnin + lag
+            }
+            "lag" => {
+                let lag = Self::parse_lag_from_node(&node);
+                let parent_burnin: usize = self
+                    .get_parents(node_id)
+                    .iter()
+                    .map(|&parent_id| self.calculate_burnin_days(parent_id))
+                    .max()
+                    .unwrap_or(0);
+                parent_burnin + lag
             }
             "Volatility" => {
                 // Volatility needs window_size extra returns
@@ -983,6 +1007,18 @@ impl AnalyticsDag {
                     .max()
                     .unwrap_or(0)
             }
+        }
+    }
+
+    fn parse_lag_from_node(node: &Node) -> usize {
+        if let NodeParams::Map(ref params) = node.params {
+            params
+                .get("lag")
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|&lag| lag > 0)
+                .unwrap_or(1)
+        } else {
+            1
         }
     }
 
@@ -1073,9 +1109,13 @@ impl AnalyticsDag {
         for &current_id in &nodes_to_execute {
             // Get parent outputs from cache
             let parents = self.get_parents(current_id);
-            let parent_outputs: Vec<Vec<TimeSeriesPoint>> = parents
+            let parent_outputs: Vec<ParentOutput> = parents
                 .iter()
-                .map(|&parent_id| cache.get(parent_id).cloned().unwrap_or_default())
+                .map(|&parent_id| ParentOutput {
+                    node_id: parent_id,
+                    analytic: self.analytic_type_for_node(parent_id),
+                    output: cache.get(parent_id).cloned().unwrap_or_default(),
+                })
                 .collect();
 
             // Execute the node based on its type (using extended range for data loading)
@@ -1218,7 +1258,7 @@ impl AnalyticsDag {
     fn execute_pull_node(
         &self,
         node_id: NodeId,
-        parent_outputs: &[Vec<TimeSeriesPoint>],
+        parent_outputs: &[ParentOutput],
         date_range: &DateRange,
         provider: &dyn DataProvider,
         calendar_cache: &mut HashMap<AssetKey, Vec<DateTime<Utc>>>,
@@ -1246,7 +1286,7 @@ impl AnalyticsDag {
     pub(crate) fn execute_push_node(
         &self,
         node_id: NodeId,
-        parent_outputs: &[Vec<TimeSeriesPoint>],
+        parent_outputs: &[ParentOutput],
         timestamp: DateTime<Utc>,
         value: f64,
     ) -> Result<NodeOutput, DagError> {
@@ -1268,6 +1308,20 @@ impl Default for AnalyticsDag {
 mod tests {
     use super::*;
     use crate::asset_key::AssetKey;
+
+    fn add_returns_chain(dag: &mut AnalyticsDag, asset: AssetKey) -> (NodeId, NodeId, NodeId) {
+        let data_node = dag.add_node(
+            "DataProvider".to_string(),
+            NodeParams::None,
+            vec![asset.clone()],
+        );
+        let lag_node = dag.add_node("lag".to_string(), NodeParams::None, vec![asset.clone()]);
+        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![asset]);
+        dag.add_edge(data_node, lag_node).unwrap();
+        dag.add_edge(data_node, returns_node).unwrap();
+        dag.add_edge(lag_node, returns_node).unwrap();
+        (data_node, lag_node, returns_node)
+    }
 
     /// Task Group 1.1: Write 2-8 focused tests for DAG library evaluation
     ///
@@ -2812,14 +2866,7 @@ mod tests {
         ];
         provider.add_data(aapl.clone(), test_data);
 
-        let data_node = dag.add_node(
-            "DataProvider".to_string(),
-            NodeParams::None,
-            vec![aapl.clone()],
-        );
-        let returns_node =
-            dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl.clone()]);
-        dag.add_edge(data_node, returns_node).unwrap();
+        let (_, _, returns_node) = add_returns_chain(&mut dag, aapl.clone());
 
         let date_range = DateRange::new(
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
