@@ -119,7 +119,7 @@ mod tests {
     fn exponential_window_produces_ema_chain() {
         let window = ExponentialWindow::new(0.5, 5);
         let data = vec![10.0, 20.0, 40.0];
-        let result = window.apply(&data, |prev, value| ema_step(*prev, value, 0.5));
+        let result = window.apply(&data, |prev, value| ema_step(prev, value, 0.5));
         assert_eq!(result.len(), data.len());
         assert!((result[0] - 10.0).abs() < 1e-12);
         assert!(window.burn_in() == 5);

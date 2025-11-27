@@ -1266,7 +1266,7 @@ mod tests {
         let mut engine = PushModeEngine::new(dag);
 
         let node_id = NodeId(1);
-        let callback = Box::new(|_node_id, _output, _timestamp| {
+        let callback: Callback = Box::new(|_node_id, _output, _timestamp| {
             // Test callback
         });
 
@@ -1682,7 +1682,7 @@ mod tests {
         engine
             .register_callback(
                 data_node,
-                Box::new(move |output| {
+                Box::new(move |_, output, _| {
                     if let NodeOutput::Single(points) = output {
                         if !points.is_empty() {
                             *callback_fired_clone.lock().unwrap() = true;

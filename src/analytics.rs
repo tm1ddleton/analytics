@@ -1050,7 +1050,7 @@ mod tests {
 
         match result {
             NodeOutput::Scalar(value) => {
-                let expected = (110.0 / 100.0).ln();
+                let expected = (110.0_f64 / 100.0_f64).ln();
                 assert!((value - expected).abs() < 1e-12);
             }
             _ => panic!("Expected Scalar output"),

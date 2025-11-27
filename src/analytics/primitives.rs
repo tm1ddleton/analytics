@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn log_return_window_uses_first_and_last() {
         let result = log_return_window(&[100.0, 105.0, 110.0]);
-        assert!((result - (110.0 / 100.0).ln()).abs() < 1e-10);
+        assert!((result - (110.0_f64 / 100.0_f64).ln()).abs() < 1e-10);
     }
 
     #[test]
