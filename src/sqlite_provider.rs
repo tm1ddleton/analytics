@@ -651,6 +651,62 @@ impl DataProvider for SqliteDataProvider {
 
         Ok(points)
     }
+
+    fn available_dates(
+        &self,
+        asset_key: &AssetKey,
+        date_range: &DateRange,
+    ) -> Result<Vec<DateTime<Utc>>, DataProviderError> {
+        if date_range.start > date_range.end {
+            return Err(DataProviderError::InvalidDateRange);
+        }
+
+        let asset_key_str = asset_key.as_string();
+        let start_date_str = date_range.start.format("%Y-%m-%d").to_string();
+        let end_date_str = date_range.end.format("%Y-%m-%d").to_string();
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT timestamp FROM time_series_data
+                WHERE asset_key = ?1
+                AND date(timestamp) >= ?2
+                AND date(timestamp) <= ?3
+                ORDER BY timestamp",
+            )
+            .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
+
+        let rows = stmt
+            .query_map([&asset_key_str, &start_date_str, &end_date_str], |row| {
+                let timestamp_str: String = row.get(0)?;
+                let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
+                    .map_err(|e| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            format!("Invalid timestamp: {}", e),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?
+                    .with_timezone(&Utc);
+                Ok(timestamp)
+            })
+            .map_err(|e| DataProviderError::Other(format!("SQL error: {}", e)))?;
+
+        let mut dates = Vec::new();
+        for row in rows {
+            match row {
+                Ok(dt) => dates.push(dt),
+                Err(e) => {
+                    return Err(DataProviderError::Other(format!(
+                        "Row parsing error: {}",
+                        e
+                    )))
+                }
+            }
+        }
+
+        Ok(dates)
+    }
 }
 
 #[cfg(test)]

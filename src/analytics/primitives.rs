@@ -1,34 +1,25 @@
 //! Stateless analytic primitives used by the DAG execution helpers.
 //!
-//! These are pure functions that only operate on slices of numeric data and
-//! can be composed with windowing strategies.
+//! These are pure, composable primitives described as traits. The registry
+//! dispatches the correct primitive implementation for each `AnalyticType`.
 
-/// Calculates the log return between the first and last values in the window.
-///
-/// Returns `f64::NAN` when there are fewer than two values available. If any
-/// price is invalid (non-positive or NaN) the function mirrors the legacy
-/// behavior by returning `0.0`.
-pub fn log_return_window(window: &[f64]) -> f64 {
-    if window.len() < 2 {
-        return f64::NAN;
-    }
+use crate::asset_key::AssetKey;
 
-    let first = window[0];
-    let last = window[window.len() - 1];
-
-    if first <= 0.0 || last <= 0.0 || first.is_nan() || last.is_nan() {
+/// Helper: returns log ratio between two prices same as previous `log_return_window`.
+fn log_return_value(current: f64, lagged: f64) -> f64 {
+    if lagged <= 0.0 || current <= 0.0 || lagged.is_nan() || current.is_nan() {
         return 0.0;
     }
 
-    let log_return = (last / first).ln();
-    if log_return.is_nan() {
+    let value = (current / lagged).ln();
+    if value.is_nan() {
         0.0
     } else {
-        log_return
+        value
     }
 }
 
-/// Calculates the population standard deviation of available (non-NaN) values.
+/// Calculates the population standard deviation of the provided values.
 pub fn population_std_dev(values: &[f64]) -> f64 {
     let valid_values: Vec<f64> = values.iter().copied().filter(|v| !v.is_nan()).collect();
 
@@ -54,9 +45,102 @@ pub fn ema_step(previous: Option<f64>, value: f64, lambda: f64) -> f64 {
     }
 }
 
+/// Public helper that mimics the earlier `log_return_window`.
+pub fn log_return_window(window: &[f64]) -> f64 {
+    if window.len() < 2 {
+        return f64::NAN;
+    }
+
+    log_return_value(window[window.len() - 1], window[0])
+}
+
+/// Primitive trait that computes returns given current and lagged prices.
+pub trait ReturnPrimitive: Send + Sync {
+    /// Name used for logging/diagnostics.
+    fn name(&self) -> &'static str;
+
+    /// Computes a return from the supplied pair.
+    fn compute(&self, asset: Option<&AssetKey>, current: f64, lagged: f64) -> f64;
+}
+
+/// Log return primitive that mirrors legacy behavior.
+pub struct LogReturnPrimitive;
+
+impl ReturnPrimitive for LogReturnPrimitive {
+    fn name(&self) -> &'static str {
+        "log_return"
+    }
+
+    fn compute(&self, _asset: Option<&AssetKey>, current: f64, lagged: f64) -> f64 {
+        log_return_value(current, lagged)
+    }
+}
+
+/// Arithmetic return primitive.
+pub struct ArithReturnPrimitive;
+
+impl ReturnPrimitive for ArithReturnPrimitive {
+    fn name(&self) -> &'static str {
+        "arith_return"
+    }
+
+    fn compute(&self, _asset: Option<&AssetKey>, current: f64, lagged: f64) -> f64 {
+        if lagged == 0.0 || lagged.is_nan() || current.is_nan() {
+            return 0.0;
+        }
+
+        current / lagged - 1.0
+    }
+}
+
+/// Primitive trait for volatility calculations.
+pub trait VolatilityPrimitive: Send + Sync {
+    /// Name for the primitive.
+    fn name(&self) -> &'static str;
+
+    /// Computes volatility over a window of return values.
+    fn compute(&self, asset: Option<&AssetKey>, window: &[f64]) -> f64;
+}
+
+/// Standard deviation primitive.
+pub struct StdDevVolatilityPrimitive;
+
+impl VolatilityPrimitive for StdDevVolatilityPrimitive {
+    fn name(&self) -> &'static str {
+        "population_std_dev"
+    }
+
+    fn compute(&self, _asset: Option<&AssetKey>, window: &[f64]) -> f64 {
+        population_std_dev(window)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_return_has_nan_guardrails() {
+        let primitive = LogReturnPrimitive;
+        let expected = (105.0_f64 / 100.0_f64).ln();
+        assert_eq!(primitive.compute(None, 105.0, 100.0), expected);
+        assert_eq!(primitive.compute(None, -1.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn arith_return_handles_zero_lag() {
+        let primitive = ArithReturnPrimitive;
+        let result = primitive.compute(None, 105.0, 100.0);
+        assert!((result - 0.05).abs() < 1e-12);
+        assert_eq!(primitive.compute(None, 105.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn stddev_handles_nan() {
+        let primitive = StdDevVolatilityPrimitive;
+        let data = vec![1.0, 2.0, f64::NAN];
+        assert!((primitive.compute(None, &data).is_finite()));
+    }
 
     #[test]
     fn log_return_window_requires_two_values() {

@@ -9,7 +9,8 @@
 //! Run with: cargo run --example replay_volatility
 
 use analytics::{
-    calculate_volatility, AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
+    analytics::primitives::{StdDevVolatilityPrimitive, VolatilityPrimitive},
+    AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
 };
 use chrono::{NaiveDate, TimeZone, Utc};
 use std::sync::Arc;
@@ -91,10 +92,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Rolling Volatility Analysis ===\n");
 
     let collected_prices = prices.lock().unwrap();
-    let window_sizes = vec![5, 10, 20];
+    let window_sizes = vec![5usize, 10, 20];
 
     for window in window_sizes {
-        let volatility = calculate_volatility(&collected_prices, window);
+        let primitive = StdDevVolatilityPrimitive;
+        let mut volatility = Vec::with_capacity(collected_prices.len());
+        for (idx, _) in collected_prices.iter().enumerate() {
+            let start = idx.saturating_sub(window.saturating_sub(1));
+            volatility.push(primitive.compute(None, &collected_prices[start..=idx]));
+        }
 
         // Get the last few volatility values
         let last_n = 5.min(volatility.len());

@@ -4,16 +4,16 @@ Define your technical stack below. This serves as a reference for all team membe
 
 ### Framework & Runtime
 - **Application Framework:** [e.g., Rails, Django, Next.js, Express]
-- **Language/Runtime:** [e.g., Ruby, Python, Node.js, Java]
-- **Package Manager:** [e.g., bundler, pip, npm, yarn]
+- **Language/Runtime:** Rust
+- **Package Manager:** Cargo
 
 ### Frontend
-- **JavaScript Framework:** [e.g., React, Vue, Svelte, Alpine, vanilla JS]
+- **JavaScript Framework:** React
 - **CSS Framework:** [e.g., Tailwind CSS, Bootstrap, custom]
-- **UI Components:** [e.g., shadcn/ui, Material UI, custom library]
+- **UI Components:** Material UI
 
 ### Database & Storage
-- **Database:** [e.g., PostgreSQL, MySQL, MongoDB]
+- **Database:** Sqllite for this prototype exercise
 - **ORM/Query Builder:** [e.g., ActiveRecord, Prisma, Sequelize]
 - **Caching:** [e.g., Redis, Memcached]
 

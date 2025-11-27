@@ -6,7 +6,10 @@
 //! - Compare with push-mode (which updates incrementally)
 
 use analytics::{
-    calculate_returns, calculate_volatility, AssetKey, DateRange, VolatilityQueryBuilder,
+    analytics::primitives::{
+        LogReturnPrimitive, ReturnPrimitive, StdDevVolatilityPrimitive, VolatilityPrimitive,
+    },
+    AssetKey, DateRange, VolatilityQueryBuilder,
 };
 use chrono::NaiveDate;
 
@@ -53,7 +56,13 @@ fn main() {
 
     // Calculate returns (full time series)
     println!("📈 Step 1: Calculate Returns");
-    let returns = calculate_returns(&prices);
+    println!("📈 Step 1: Calculate Returns");
+    let mut returns = Vec::with_capacity(prices.len());
+    returns.push(f64::NAN);
+    let log_primitive = LogReturnPrimitive;
+    for window in prices.windows(2) {
+        returns.push(log_primitive.compute(None, window[1], window[0]));
+    }
     println!("   ✓ {} returns calculated", returns.len());
 
     // Calculate volatility (full time series)
@@ -61,7 +70,12 @@ fn main() {
         "\n📊 Step 2: Calculate {}-day Rolling Volatility",
         window_size
     );
-    let volatility = calculate_volatility(&returns, window_size);
+    let mut volatility = Vec::with_capacity(returns.len());
+    let vol_primitive = StdDevVolatilityPrimitive;
+    for (idx, _) in returns.iter().enumerate() {
+        let start = idx.saturating_sub(window_size - 1);
+        volatility.push(vol_primitive.compute(None, &returns[start..=idx]));
+    }
     println!("   ✓ {} volatility points calculated", volatility.len());
 
     // Display results

@@ -8,3 +8,5 @@
 - **Remove Dead Code**: Delete unused code, commented-out blocks, and imports rather than leaving them as clutter
 - **Backward compatibility only when required:** Unless specifically instructed otherwise, assume you do not need to write additional code logic to handle backward compatibility.
 - **DRY Principle**: Avoid duplication by extracting common logic into reusable functions or modules
+- **Avoid long modules**:  Avoid modules longer than 1000 lines where possible.  Break up into packages sooner rather than later
+- **Stateless analytics**: Analytics should be stateless and have the data they need injected rather than querying out

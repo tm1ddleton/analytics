@@ -1,3 +1,7 @@
+use crate::analytics::primitives::{
+    LogReturnPrimitive, ReturnPrimitive, StdDevVolatilityPrimitive, VolatilityPrimitive,
+};
+use crate::asset_key::AssetKey;
 use crate::dag::{AnalyticType, DagError, Node, NodeKey, NodeOutput, NodeParams, WindowSpec};
 use crate::time_series::{DataProvider, DateRange, TimeSeriesPoint};
 use chrono::{DateTime, Duration, Utc};
@@ -115,7 +119,7 @@ struct ReturnsDefinition {
 impl ReturnsDefinition {
     fn new() -> Self {
         ReturnsDefinition {
-            executor: Box::new(ReturnsExecutor),
+            executor: Box::new(ReturnsExecutor::new(Box::new(LogReturnPrimitive))),
         }
     }
 }
@@ -160,7 +164,7 @@ struct VolatilityDefinition {
 impl VolatilityDefinition {
     fn new() -> Self {
         VolatilityDefinition {
-            executor: Box::new(VolatilityExecutor),
+            executor: Box::new(VolatilityExecutor::new(Box::new(StdDevVolatilityPrimitive))),
         }
     }
 }
@@ -241,12 +245,53 @@ impl AnalyticExecutor for DataProviderExecutor {
     }
 }
 
-struct ReturnsExecutor;
+struct ReturnsExecutor {
+    primitive: Box<dyn ReturnPrimitive>,
+}
+
+impl ReturnsExecutor {
+    fn new(primitive: Box<dyn ReturnPrimitive>) -> Self {
+        ReturnsExecutor { primitive }
+    }
+
+    fn build_series(&self, asset: &AssetKey, prices: &[TimeSeriesPoint]) -> Vec<TimeSeriesPoint> {
+        if prices.is_empty() {
+            return Vec::new();
+        }
+
+        let mut result = Vec::with_capacity(prices.len());
+        result.push(TimeSeriesPoint::new(prices[0].timestamp, f64::NAN));
+
+        for window in prices.windows(2) {
+            let value =
+                self.primitive
+                    .compute(Some(asset), window[1].close_price, window[0].close_price);
+            result.push(TimeSeriesPoint::new(window[1].timestamp, value));
+        }
+
+        result
+    }
+
+    fn build_update(&self, asset: &AssetKey, prices: &[TimeSeriesPoint]) -> Result<f64, DagError> {
+        if prices.len() < 2 {
+            return Err(DagError::ExecutionError(
+                "Returns update requires at least two price points".to_string(),
+            ));
+        }
+
+        let len = prices.len();
+        Ok(self.primitive.compute(
+            Some(asset),
+            prices[len - 1].close_price,
+            prices[len - 2].close_price,
+        ))
+    }
+}
 
 impl AnalyticExecutor for ReturnsExecutor {
     fn execute_pull(
         &self,
-        _node: &Node,
+        node: &Node,
         parent_outputs: &[Vec<TimeSeriesPoint>],
         _date_range: &DateRange,
         _provider: &dyn DataProvider,
@@ -262,39 +307,46 @@ impl AnalyticExecutor for ReturnsExecutor {
             return Ok(Vec::new());
         }
 
-        let prices: Vec<f64> = prices_data.iter().map(|p| p.close_price).collect();
-        let returns = super::calculate_returns(&prices);
+        let asset = node
+            .assets
+            .first()
+            .ok_or_else(|| DagError::ExecutionError("Returns node missing asset".to_string()))?;
 
-        let result: Vec<TimeSeriesPoint> = prices_data
-            .iter()
-            .zip(returns.iter())
-            .map(|(point, &ret)| TimeSeriesPoint::new(point.timestamp, ret))
-            .collect();
-
-        Ok(result)
+        Ok(self.build_series(asset, prices_data))
     }
 
     fn execute_push(
         &self,
-        _node: &Node,
+        node: &Node,
         parent_outputs: &[Vec<TimeSeriesPoint>],
         _timestamp: DateTime<Utc>,
         _value: f64,
     ) -> Result<NodeOutput, DagError> {
-        if parent_outputs.is_empty() || parent_outputs[0].len() < 2 {
+        if parent_outputs.is_empty() {
             return Err(DagError::ExecutionError(
-                "Returns update requires at least two price points".to_string(),
+                "Returns update requires input data".to_string(),
             ));
         }
 
-        let value = super::calculate_returns_update(&parent_outputs[0]);
+        let asset = node
+            .assets
+            .first()
+            .ok_or_else(|| DagError::ExecutionError("Returns node missing asset".to_string()))?;
+
+        let value = self.build_update(asset, &parent_outputs[0])?;
         Ok(NodeOutput::Scalar(value))
     }
 }
 
-struct VolatilityExecutor;
+struct VolatilityExecutor {
+    primitive: Box<dyn VolatilityPrimitive>,
+}
 
 impl VolatilityExecutor {
+    fn new(primitive: Box<dyn VolatilityPrimitive>) -> Self {
+        VolatilityExecutor { primitive }
+    }
+
     fn window_size_from_node(node: &Node) -> usize {
         if let NodeParams::Map(ref params) = node.params {
             params
@@ -331,13 +383,17 @@ impl AnalyticExecutor for VolatilityExecutor {
             .iter()
             .map(|p| p.close_price)
             .collect::<Vec<_>>();
-        let volatility = super::calculate_volatility(&returns, window_size);
+        let asset = node
+            .assets
+            .first()
+            .ok_or_else(|| DagError::ExecutionError("Volatility node missing asset".to_string()))?;
 
-        let result: Vec<TimeSeriesPoint> = returns_data
-            .iter()
-            .zip(volatility.iter())
-            .map(|(point, &vol)| TimeSeriesPoint::new(point.timestamp, vol))
-            .collect();
+        let mut result = Vec::with_capacity(returns_data.len());
+        for (idx, point) in returns_data.iter().enumerate() {
+            let start = idx.saturating_sub(window_size - 1);
+            let value = self.primitive.compute(Some(asset), &returns[start..=idx]);
+            result.push(TimeSeriesPoint::new(point.timestamp, value));
+        }
 
         Ok(result)
     }
@@ -356,7 +412,16 @@ impl AnalyticExecutor for VolatilityExecutor {
         }
 
         let window_size = Self::window_size_from_node(node);
-        let value = super::calculate_volatility_update(&parent_outputs[0], window_size);
+        let asset = node
+            .assets
+            .first()
+            .ok_or_else(|| DagError::ExecutionError("Volatility node missing asset".to_string()))?;
+        let closes: Vec<f64> = parent_outputs[0]
+            .iter()
+            .map(|point| point.close_price)
+            .collect();
+        let start = closes.len().saturating_sub(window_size);
+        let value = self.primitive.compute(Some(asset), &closes[start..]);
         Ok(NodeOutput::Scalar(value))
     }
 }

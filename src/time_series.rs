@@ -76,6 +76,13 @@ pub trait DataProvider {
         asset_key: &AssetKey,
         date_range: &DateRange,
     ) -> Result<Vec<TimeSeriesPoint>, DataProviderError>;
+
+    /// Returns the sorted list of timestamps that exist for the given asset/date range.
+    fn available_dates(
+        &self,
+        asset_key: &AssetKey,
+        date_range: &DateRange,
+    ) -> Result<Vec<DateTime<Utc>>, DataProviderError>;
 }
 
 /// Errors that can occur when querying a data provider.
@@ -167,6 +174,33 @@ impl DataProvider for InMemoryDataProvider {
             .collect();
 
         Ok(filtered)
+    }
+
+    fn available_dates(
+        &self,
+        asset_key: &AssetKey,
+        date_range: &DateRange,
+    ) -> Result<Vec<DateTime<Utc>>, DataProviderError> {
+        if date_range.start > date_range.end {
+            return Err(DataProviderError::InvalidDateRange);
+        }
+
+        let all_points = self
+            .data
+            .get(asset_key)
+            .ok_or(DataProviderError::AssetNotFound)?;
+
+        let mut filtered_dates: Vec<DateTime<Utc>> = all_points
+            .iter()
+            .filter(|point| {
+                let point_date = point.timestamp.date_naive();
+                point_date >= date_range.start && point_date <= date_range.end
+            })
+            .map(|point| point.timestamp)
+            .collect();
+
+        filtered_dates.sort();
+        Ok(filtered_dates)
     }
 }
 

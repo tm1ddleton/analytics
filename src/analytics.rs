@@ -4,19 +4,23 @@
 //! returns and volatility calculations. These functions operate on raw f64
 //! arrays for performance and are designed to integrate with the DAG framework.
 
-mod primitives;
+mod lag;
+pub mod primitives;
 pub mod registry;
+#[cfg(test)]
+pub(crate) mod testing;
 mod windows;
 
 use crate::asset_key::AssetKey;
 use crate::dag::{DagError, NodeId, NodeParams};
 use crate::time_series::{DateRange, TimeSeriesPoint};
-use primitives::{ema_step, log_return_window, population_std_dev};
+use primitives::ema_step;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use windows::{ExponentialWindow, FixedWindow, WindowStrategy};
+use windows::{ExponentialWindow, WindowStrategy};
 
+pub use lag::LagAnalytic;
 pub use registry::AnalyticRegistry;
 
 /// Output mode for analytics queries
@@ -46,21 +50,14 @@ pub enum OutputMode {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::calculate_returns;
+/// use analytics::analytics::primitives::{LogReturnPrimitive, ReturnPrimitive};
 ///
-/// let prices = vec![100.0, 105.0, 103.0];
-/// let returns = calculate_returns(&prices);
+/// let primitive = LogReturnPrimitive;
+/// let returns = ReturnPrimitive::compute(&primitive, None, 105.0, 100.0);
+/// let expected = (105.0_f64 / 100.0).ln();
 ///
-/// assert!(returns[0].is_nan()); // First value is NaN
-/// // Second value: ln(105/100) ≈ 0.04879
-/// // Third value: ln(103/105) ≈ -0.01942
+/// assert!((returns - expected).abs() < 1e-10);
 /// ```
-pub fn calculate_returns(prices: &[f64]) -> Vec<f64> {
-    let window = FixedWindow::new(2);
-    let _ = window.burn_in();
-    window.apply(prices, |window| log_return_window(window))
-}
-
 /// Calculates rolling volatility from a returns series.
 ///
 /// Uses population standard deviation formula: σ = sqrt(sum((r_i - μ)²) / N)
@@ -83,46 +80,14 @@ pub fn calculate_returns(prices: &[f64]) -> Vec<f64> {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::calculate_volatility;
+/// use analytics::analytics::primitives::{StdDevVolatilityPrimitive, VolatilityPrimitive};
 ///
-/// let returns = vec![0.01, -0.02, 0.015, -0.01, 0.02];
-/// let volatility = calculate_volatility(&returns, 3);
-///
-/// // Each point calculates std dev of past 3 returns
+/// let primitive = StdDevVolatilityPrimitive;
+/// let value = VolatilityPrimitive::compute(&primitive, None, &[0.01, -0.02, 0.015]);
+/// assert!(value >= 0.0);
 /// ```
-pub fn calculate_volatility(returns: &[f64], window_size: usize) -> Vec<f64> {
-    if window_size == 0 {
-        return Vec::new();
-    }
-
-    let window = FixedWindow::new(window_size);
-    let _ = window.burn_in();
-    window.apply(returns, |window| population_std_dev(window))
-}
-
 /// Calculates the latest update value for returns based on available price points.
-pub fn calculate_returns_update(prices: &[TimeSeriesPoint]) -> f64 {
-    let closes: Vec<f64> = prices.iter().map(|point| point.close_price).collect();
-
-    if closes.len() < 2 {
-        return f64::NAN;
-    }
-
-    let window = &closes[closes.len().saturating_sub(2)..];
-    log_return_window(window)
-}
-
 /// Calculates the latest volatility update from the most recent returns.
-pub fn calculate_volatility_update(returns: &[TimeSeriesPoint], window_size: usize) -> f64 {
-    if returns.is_empty() || window_size == 0 {
-        return f64::NAN;
-    }
-
-    let closes: Vec<f64> = returns.iter().map(|point| point.close_price).collect();
-    let start = closes.len().saturating_sub(window_size);
-    population_std_dev(&closes[start..])
-}
-
 /// Calculates an exponential moving average series.
 ///
 /// The behavior mirrors an EMA window where the first output echoes the first
@@ -440,7 +405,7 @@ mod tests {
     fn test_returns_with_known_price_sequence() {
         // Test log returns with known price sequences
         let prices = vec![100.0, 110.0, 105.0, 115.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert_eq!(returns.len(), 4);
         assert!(returns[0].is_nan(), "First return should be NaN");
@@ -468,7 +433,7 @@ mod tests {
     fn test_returns_first_value_is_nan() {
         // Test that first value is NaN (no previous price)
         let prices = vec![100.0, 105.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert!(returns[0].is_nan(), "First return should be NaN");
         assert!(!returns[1].is_nan(), "Second return should not be NaN");
@@ -478,7 +443,7 @@ mod tests {
     fn test_returns_nan_handling() {
         // Test NaN handling (convert to 0)
         let prices = vec![100.0, f64::NAN, 110.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert!(returns[0].is_nan(), "First return should be NaN");
         assert_eq!(returns[1], 0.0, "NaN price should produce 0 return");
@@ -489,7 +454,7 @@ mod tests {
     fn test_returns_flat_prices() {
         // Test returns on flat prices (ln(1) = 0)
         let prices = vec![100.0, 100.0, 100.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert!(returns[0].is_nan());
         assert_eq!(returns[1], 0.0, "Flat price should give 0 return");
@@ -500,7 +465,7 @@ mod tests {
     fn test_returns_increasing_sequence() {
         // Test returns on increasing sequence
         let prices = vec![100.0, 110.0, 121.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert!(returns[0].is_nan());
         assert!(
@@ -517,7 +482,7 @@ mod tests {
     fn test_returns_decreasing_sequence() {
         // Test returns on decreasing sequence
         let prices = vec![100.0, 90.0, 81.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert!(returns[0].is_nan());
         assert!(
@@ -534,7 +499,7 @@ mod tests {
     fn test_returns_empty_input() {
         // Test empty input
         let prices: Vec<f64> = vec![];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert_eq!(returns.len(), 0, "Empty input should give empty output");
     }
@@ -543,7 +508,7 @@ mod tests {
     fn test_returns_single_price() {
         // Test single price
         let prices = vec![100.0];
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert_eq!(returns.len(), 1);
         assert!(returns[0].is_nan(), "Single price should give NaN");
@@ -556,7 +521,7 @@ mod tests {
         // Test volatility with known return sequences
         let returns = vec![0.01, -0.01, 0.02, -0.02, 0.015];
         let window_size = 3;
-        let volatility = calculate_volatility(&returns, window_size);
+        let volatility = testing::calculate_volatility(&returns, window_size);
 
         assert_eq!(volatility.len(), returns.len());
 
@@ -574,7 +539,7 @@ mod tests {
         // Test rolling window (each point uses past N days)
         let returns = vec![0.01, 0.02, 0.03, 0.04, 0.05];
         let window_size = 2;
-        let volatility = calculate_volatility(&returns, window_size);
+        let volatility = testing::calculate_volatility(&returns, window_size);
 
         assert_eq!(volatility.len(), 5);
 
@@ -589,7 +554,7 @@ mod tests {
     fn test_volatility_population_std_dev() {
         // Test population standard deviation (divide by N)
         let returns = vec![0.02, 0.04]; // mean = 0.03, diff = [0.01, 0.01]
-        let volatility = calculate_volatility(&returns, 2);
+        let volatility = testing::calculate_volatility(&returns, 2);
 
         // Pop std dev = sqrt((0.01² + 0.01²) / 2) = sqrt(0.0001) = 0.01
         let expected = 0.01;
@@ -601,7 +566,7 @@ mod tests {
         // Test handling when window size larger than data
         let returns = vec![0.01, 0.02, 0.03];
         let window_size = 10; // Larger than data
-        let volatility = calculate_volatility(&returns, window_size);
+        let volatility = testing::calculate_volatility(&returns, window_size);
 
         assert_eq!(volatility.len(), 3);
         // Should use all available data
@@ -612,7 +577,7 @@ mod tests {
         // Test window size exceeds data length
         let returns = vec![0.01, 0.02];
         let window_size = 5;
-        let volatility = calculate_volatility(&returns, window_size);
+        let volatility = testing::calculate_volatility(&returns, window_size);
 
         assert_eq!(
             volatility.len(),
@@ -625,7 +590,7 @@ mod tests {
     fn test_volatility_zero_window() {
         // Test edge case: zero window size
         let returns = vec![0.01, 0.02, 0.03];
-        let volatility = calculate_volatility(&returns, 0);
+        let volatility = testing::calculate_volatility(&returns, 0);
 
         assert_eq!(volatility.len(), 0, "Zero window should return empty");
     }
@@ -634,7 +599,7 @@ mod tests {
     fn test_volatility_empty_returns() {
         // Test empty returns
         let returns: Vec<f64> = vec![];
-        let volatility = calculate_volatility(&returns, 5);
+        let volatility = testing::calculate_volatility(&returns, 5);
 
         assert_eq!(volatility.len(), 0);
     }
@@ -1059,7 +1024,7 @@ mod tests {
 
         // The stateless volatility function will handle insufficient data gracefully
         let returns = vec![0.01, 0.02, 0.03, 0.04, 0.05];
-        let volatility = calculate_volatility(&returns, 30);
+        let volatility = testing::calculate_volatility(&returns, 30);
 
         // Should use all available data
         assert_eq!(volatility.len(), 5);
@@ -1076,7 +1041,7 @@ mod tests {
             105.0, // Day 4: +2% = ln(105/103) ≈ 0.0192
         ];
 
-        let returns = calculate_returns(&prices);
+        let returns = testing::calculate_returns(&prices);
 
         assert_eq!(returns.len(), 5);
         assert!(returns[0].is_nan()); // First return is NaN
@@ -1100,7 +1065,7 @@ mod tests {
             0.01,     // 1%
         ];
 
-        let volatility = calculate_volatility(&returns, 3);
+        let volatility = testing::calculate_volatility(&returns, 3);
 
         assert_eq!(volatility.len(), 6);
 

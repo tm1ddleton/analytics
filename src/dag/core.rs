@@ -45,6 +45,91 @@ impl std::fmt::Display for DagError {
     }
 }
 
+impl AnalyticsDag {
+    fn simulate_push_from_calendar(
+        &self,
+        nodes_to_execute: &[NodeId],
+        data_points: &[TimeSeriesPoint],
+        target_node: NodeId,
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        let mut push_history: HashMap<NodeId, Vec<TimeSeriesPoint>> = HashMap::new();
+
+        for point in data_points {
+            for &node_id in nodes_to_execute {
+                let parent_histories: Vec<Vec<TimeSeriesPoint>> = self
+                    .get_parents(node_id)
+                    .iter()
+                    .map(|&parent_id| push_history.get(&parent_id).cloned().unwrap_or_default())
+                    .collect();
+
+                let output = match self.execute_push_node(
+                    node_id,
+                    &parent_histories,
+                    point.timestamp,
+                    point.close_price,
+                ) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        if Self::is_insufficient_data_error(&err) {
+                            push_history
+                                .entry(node_id)
+                                .or_insert_with(Vec::new)
+                                .push(TimeSeriesPoint::new(point.timestamp, f64::NAN));
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                };
+                let mut points = Self::node_output_to_timeseries(&output, point.timestamp);
+                if !points.is_empty() {
+                    push_history
+                        .entry(node_id)
+                        .or_insert_with(Vec::new)
+                        .append(&mut points);
+                }
+            }
+        }
+
+        Ok(push_history.get(&target_node).cloned().unwrap_or_default())
+    }
+
+    fn node_output_to_timeseries(
+        output: &NodeOutput,
+        timestamp: DateTime<Utc>,
+    ) -> Vec<TimeSeriesPoint> {
+        match output {
+            NodeOutput::Single(points) => points.clone(),
+            NodeOutput::Scalar(value) => vec![TimeSeriesPoint::new(timestamp, *value)],
+            NodeOutput::Collection(collection) => collection
+                .iter()
+                .flat_map(|points_vec| points_vec.clone())
+                .collect(),
+            NodeOutput::None => Vec::new(),
+        }
+    }
+
+    fn is_insufficient_data_error(err: &DagError) -> bool {
+        matches!(
+            err,
+            DagError::ExecutionError(msg) if {
+                msg.contains("requires at least two price points")
+                    || msg.contains("requires returns data")
+            }
+        )
+    }
+
+    fn is_data_provider_node(&self, node_id: NodeId) -> bool {
+        if let Some(key) = self.node_key(node_id) {
+            key.analytic == AnalyticType::DataProvider
+        } else if let Some(node) = self.get_node(node_id) {
+            let lower = node.node_type.to_lowercase();
+            lower == "data_provider" || lower == "dataprovider"
+        } else {
+            false
+        }
+    }
+}
+
 impl From<DataProviderError> for DagError {
     fn from(err: DataProviderError) -> Self {
         DagError::DataProviderError(err.to_string())
@@ -982,6 +1067,7 @@ impl AnalyticsDag {
 
         // Create execution cache for intermediate results
         let mut cache = ExecutionCache::new();
+        let mut calendar_cache: HashMap<AssetKey, Vec<DateTime<Utc>>> = HashMap::new();
 
         // Execute nodes in topological order with extended date range
         for &current_id in &nodes_to_execute {
@@ -993,17 +1079,44 @@ impl AnalyticsDag {
                 .collect();
 
             // Execute the node based on its type (using extended range for data loading)
-            let result =
-                self.execute_pull_node(current_id, &parent_outputs, &extended_range, provider)?;
+            let result = self.execute_pull_node(
+                current_id,
+                &parent_outputs,
+                &extended_range,
+                provider,
+                &mut calendar_cache,
+            )?;
 
             // Cache the result with its extended range
             cache.insert(current_id, result, extended_range.clone());
         }
 
-        // Extract result for target node, filtered to original requested range
-        let filtered_result = cache.extract_range(node_id, &date_range).ok_or_else(|| {
-            DagError::ExecutionError(format!("No result found for node {}", node_id.0))
+        // Identify a data provider node to drive the simulated push
+        let data_node_id = nodes_to_execute
+            .iter()
+            .find(|&&id| self.is_data_provider_node(id))
+            .ok_or_else(|| {
+                DagError::ExecutionError(
+                    "No data provider node found for push simulation".to_string(),
+                )
+            })?;
+
+        let data_points = cache.get(*data_node_id).cloned().ok_or_else(|| {
+            DagError::ExecutionError("Data provider output missing for simulation".to_string())
         })?;
+
+        // Simulate push-mode over the cached calendar/timestamps
+        let simulated =
+            self.simulate_push_from_calendar(&nodes_to_execute, &data_points, node_id)?;
+
+        // Filter simulation output to the originally requested date range
+        let filtered_result: Vec<TimeSeriesPoint> = simulated
+            .into_iter()
+            .filter(|point| {
+                let date = point.timestamp.date_naive();
+                date >= date_range.start && date <= date_range.end
+            })
+            .collect();
 
         Ok(filtered_result)
     }
@@ -1108,12 +1221,26 @@ impl AnalyticsDag {
         parent_outputs: &[Vec<TimeSeriesPoint>],
         date_range: &DateRange,
         provider: &dyn DataProvider,
+        calendar_cache: &mut HashMap<AssetKey, Vec<DateTime<Utc>>>,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
         let node = self
             .get_node(node_id)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
         let executor = self.executor_for_node(node, node_id)?;
-        executor.execute_pull(node, parent_outputs, date_range, provider)
+        let result = executor.execute_pull(node, parent_outputs, date_range, provider)?;
+
+        // Capture calendar metadata for data providers
+        if let Some(key) = self.node_keys_by_id.get(&node_id) {
+            if key.analytic == AnalyticType::DataProvider {
+                if let Some(asset) = node.assets.first() {
+                    if let Ok(dates) = provider.available_dates(asset, date_range) {
+                        calendar_cache.insert(asset.clone(), dates);
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     pub(crate) fn execute_push_node(
@@ -3235,7 +3362,7 @@ mod tests {
 
     #[test]
     fn test_integration_returns_matches_analytics_function() {
-        use crate::analytics::calculate_returns;
+        use crate::analytics::testing::calculate_returns;
         use crate::time_series::InMemoryDataProvider;
         use chrono::{NaiveDate, TimeZone, Utc};
 

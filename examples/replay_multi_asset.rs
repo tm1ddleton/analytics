@@ -9,7 +9,8 @@
 //! Run with: cargo run --example replay_multi_asset
 
 use analytics::{
-    calculate_volatility, AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
+    analytics::primitives::{StdDevVolatilityPrimitive, VolatilityPrimitive},
+    AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
 };
 use chrono::{NaiveDate, TimeZone, Utc};
 use std::collections::HashMap;
@@ -149,7 +150,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let final_price = prices.last().copied().unwrap_or(0.0);
 
             // Calculate 10-day volatility
-            let volatility = calculate_volatility(prices, 10);
+            let primitive = StdDevVolatilityPrimitive;
+            let mut volatility = Vec::with_capacity(prices.len());
+            for (idx, _) in prices.iter().enumerate() {
+                let start = idx.saturating_sub(10 - 1);
+                volatility.push(primitive.compute(None, &prices[start..=idx]));
+            }
             let latest_vol = volatility
                 .last()
                 .and_then(|v| if v.is_nan() { None } else { Some(*v) })
