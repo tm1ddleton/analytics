@@ -4,7 +4,7 @@
 //! automatically update when new data arrives, propagating changes through
 //! the DAG dependency chain.
 
-use crate::analytics::{execute_returns_node, execute_volatility_node};
+use crate::analytics::{execute_returns_update, execute_volatility_update};
 use crate::asset_key::AssetKey;
 use crate::dag::{AnalyticsDag, DagError, Node, NodeId, NodeOutput, NodeParams};
 use crate::time_series::{DataProvider, DataProviderError, DateRange, TimeSeriesPoint};
@@ -202,7 +202,7 @@ impl From<DataProviderError> for InitError {
 }
 
 /// Callback function type for node updates
-pub type Callback = Box<dyn Fn(&NodeOutput) + Send + Sync>;
+pub type Callback = Box<dyn Fn(NodeId, &NodeOutput, Option<DateTime<Utc>>) + Send + Sync>;
 
 /// Push-mode analytics engine
 ///
@@ -497,19 +497,19 @@ impl PushModeEngine {
                 Ok(NodeOutput::Single(vec![point]))
             }
             "returns" => {
-                // Get parent outputs
-                let inputs = self.get_parent_outputs(node_id)?;
-                execute_returns_node(&node, &inputs).map_err(|e| PushError::PropagationFailed {
+                let inputs = self.get_parent_histories(node_id)?;
+                execute_returns_update(&node, &inputs).map_err(|e| PushError::PropagationFailed {
                     node_id,
                     error: e.to_string(),
                 })
             }
             "volatility" => {
-                // Get parent outputs
-                let inputs = self.get_parent_outputs(node_id)?;
-                execute_volatility_node(&node, &inputs).map_err(|e| PushError::PropagationFailed {
-                    node_id,
-                    error: e.to_string(),
+                let inputs = self.get_parent_histories(node_id)?;
+                execute_volatility_update(&node, &inputs).map_err(|e| {
+                    PushError::PropagationFailed {
+                        node_id,
+                        error: e.to_string(),
+                    }
                 })
             }
             _ => Err(PushError::PropagationFailed {
@@ -526,7 +526,10 @@ impl PushModeEngine {
     ///
     /// # Returns
     /// Vector of NodeOutput from each parent
-    fn get_parent_outputs(&self, node_id: NodeId) -> Result<Vec<NodeOutput>, PushError> {
+    fn get_parent_histories(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Vec<Vec<TimeSeriesPoint>>, PushError> {
         let parent_ids = self.dag.get_parents(node_id);
 
         let mut outputs = Vec::new();
@@ -535,7 +538,7 @@ impl PushModeEngine {
             if let Some(parent_state) = self.node_states.get(&parent_id) {
                 let history = parent_state.get_history().to_vec();
                 if !history.is_empty() {
-                    outputs.push(NodeOutput::Single(history));
+                    outputs.push(history);
                 }
             }
         }
@@ -576,11 +579,16 @@ impl PushModeEngine {
     ///
     /// Errors in callbacks are logged but don't halt execution.
     fn invoke_callbacks(&self, node_id: NodeId, output: &NodeOutput) {
+        let timestamp = self
+            .node_states
+            .get(&node_id)
+            .and_then(|state| state.get_last_timestamp());
+
         if let Some(callbacks) = self.callbacks.get(&node_id) {
             for callback in callbacks {
                 // Wrap in catch to prevent callback errors from propagating
                 if let Err(_e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    callback(output);
+                    callback(node_id, output, timestamp);
                 })) {
                     // Log callback error (in production, use log crate)
                     eprintln!("Callback error for node {:?}", node_id);
@@ -1258,7 +1266,7 @@ mod tests {
         let mut engine = PushModeEngine::new(dag);
 
         let node_id = NodeId(1);
-        let callback = Box::new(|_output: &NodeOutput| {
+        let callback = Box::new(|_node_id, _output, _timestamp| {
             // Test callback
         });
 
@@ -1278,10 +1286,14 @@ mod tests {
         let node_id = NodeId(1);
 
         // Register first callback
-        engine.register_callback(node_id, Box::new(|_| {})).unwrap();
+        engine
+            .register_callback(node_id, Box::new(|_, _, _| {}))
+            .unwrap();
 
         // Register second callback
-        engine.register_callback(node_id, Box::new(|_| {})).unwrap();
+        engine
+            .register_callback(node_id, Box::new(|_, _, _| {}))
+            .unwrap();
 
         // Should have 2 callbacks
         assert_eq!(engine.callbacks.get(&node_id).unwrap().len(), 2);
@@ -1302,7 +1314,7 @@ mod tests {
         engine
             .register_callback(
                 node_id,
-                Box::new(move |_| {
+                Box::new(move |_, _, _| {
                     *called_clone.lock().unwrap() = true;
                 }),
             )
@@ -1327,7 +1339,7 @@ mod tests {
         engine
             .register_callback(
                 node_id,
-                Box::new(|_| {
+                Box::new(|_, _, _| {
                     panic!("Test panic");
                 }),
             )
@@ -1471,7 +1483,7 @@ mod tests {
         engine
             .register_callback(
                 node_id,
-                Box::new(move |_| {
+                Box::new(move |_, _, _| {
                     *call_count_clone.lock().unwrap() += 1;
                 }),
             )

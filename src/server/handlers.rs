@@ -751,24 +751,58 @@ pub async fn handle_stream(
                 let analytic_str = analytic.analytic_type.clone();
                 let tx_clone = tx.clone();
 
-                if let Err(e) = push_engine.register_callback(target_node, Box::new(move |output| {
-                    // Extract the last value from the output
-                    if let NodeOutput::Single(ref data) = output {
-                        if let Some(last_point) = data.last() {
-                            if !last_point.close_price.is_nan() {
-                                tracing::debug!("Push-mode callback: {} {} at {} = {}",
-                                    asset_str, analytic_str, last_point.timestamp, last_point.close_price);
-                                let _ = tx_clone.send(Ok(Event::default()
-                                    .event("update")
-                                    .data(format!("{{\"asset\":\"{}\",\"analytic\":\"{}\",\"timestamp\":\"{}\",\"value\":{}}}",
-                                        asset_str,
-                                        analytic_str,
-                                        last_point.timestamp.to_rfc3339(),
-                                        last_point.close_price))));
+                if let Err(e) = push_engine.register_callback(
+                    target_node,
+                    Box::new(move |_node_id, output, timestamp| {
+                        match output {
+                            NodeOutput::Single(ref data) => {
+                                if let Some(last_point) = data.last() {
+                                    if !last_point.close_price.is_nan() {
+                                        tracing::debug!(
+                                            "Push-mode callback: {} {} at {} = {}",
+                                            asset_str,
+                                            analytic_str,
+                                            last_point.timestamp,
+                                            last_point.close_price
+                                        );
+                                        let _ = tx_clone.send(Ok(Event::default()
+                                            .event("update")
+                                            .data(format!(
+                                                "{{\"asset\":\"{}\",\"analytic\":\"{}\",\"timestamp\":\"{}\",\"value\":{}}}",
+                                                asset_str,
+                                                analytic_str,
+                                                last_point.timestamp.to_rfc3339(),
+                                                last_point.close_price
+                                            ))));
+                                    }
+                                }
                             }
+                            NodeOutput::Scalar(value) => {
+                                if let Some(ts) = timestamp {
+                                    if !value.is_nan() {
+                                        tracing::debug!(
+                                            "Push-mode callback: {} {} at {} = {}",
+                                            asset_str,
+                                            analytic_str,
+                                            ts,
+                                            value
+                                        );
+                                        let _ = tx_clone.send(Ok(Event::default()
+                                            .event("update")
+                                            .data(format!(
+                                                "{{\"asset\":\"{}\",\"analytic\":\"{}\",\"timestamp\":\"{}\",\"value\":{}}}",
+                                                asset_str,
+                                                analytic_str,
+                                                ts.to_rfc3339(),
+                                                value
+                                            ))));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                    }
-                })) {
+                    }),
+                ) {
                     tracing::error!("Replay: Failed to register callback: {}", e);
                     continue;
                 }

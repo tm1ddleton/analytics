@@ -4,12 +4,17 @@
 //! returns and volatility calculations. These functions operate on raw f64
 //! arrays for performance and are designed to integrate with the DAG framework.
 
+mod primitives;
+mod windows;
+
 use crate::asset_key::AssetKey;
 use crate::dag::{DagError, Node, NodeId, NodeOutput, NodeParams};
 use crate::time_series::{DateRange, TimeSeriesPoint};
+use primitives::{ema_step, log_return_window, population_std_dev};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use windows::{ExponentialWindow, FixedWindow, WindowStrategy};
 
 /// Output mode for analytics queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,38 +53,9 @@ pub enum OutputMode {
 /// // Third value: ln(103/105) ≈ -0.01942
 /// ```
 pub fn calculate_returns(prices: &[f64]) -> Vec<f64> {
-    if prices.is_empty() {
-        return Vec::new();
-    }
-
-    if prices.len() == 1 {
-        return vec![f64::NAN];
-    }
-
-    let mut returns = Vec::with_capacity(prices.len());
-
-    // First value is NaN (no previous price)
-    returns.push(f64::NAN);
-
-    // Calculate log returns for remaining prices
-    for i in 1..prices.len() {
-        let prev_price = prices[i - 1];
-        let curr_price = prices[i];
-
-        // Handle NaN or invalid values
-        if prev_price.is_nan() || curr_price.is_nan() || prev_price <= 0.0 || curr_price <= 0.0 {
-            returns.push(0.0); // Convert NaN to 0 as per spec
-        } else {
-            let log_return = (curr_price / prev_price).ln();
-            if log_return.is_nan() {
-                returns.push(0.0); // Convert NaN to 0
-            } else {
-                returns.push(log_return);
-            }
-        }
-    }
-
-    returns
+    let window = FixedWindow::new(2);
+    let _ = window.burn_in();
+    window.apply(prices, |window| log_return_window(window))
 }
 
 /// Calculates rolling volatility from a returns series.
@@ -112,59 +88,55 @@ pub fn calculate_returns(prices: &[f64]) -> Vec<f64> {
 /// // Each point calculates std dev of past 3 returns
 /// ```
 pub fn calculate_volatility(returns: &[f64], window_size: usize) -> Vec<f64> {
-    if returns.is_empty() || window_size == 0 {
+    if window_size == 0 {
         return Vec::new();
     }
 
-    let mut volatility = Vec::with_capacity(returns.len());
-
-    for i in 0..returns.len() {
-        // Determine window bounds
-        let window_start = if i + 1 < window_size {
-            0 // Use all available data if less than window_size
-        } else {
-            i + 1 - window_size
-        };
-
-        let window = &returns[window_start..=i];
-
-        // Calculate population standard deviation
-        let vol = calculate_std_dev(window);
-        volatility.push(vol);
-    }
-
-    volatility
+    let window = FixedWindow::new(window_size);
+    let _ = window.burn_in();
+    window.apply(returns, |window| population_std_dev(window))
 }
 
-/// Helper function to calculate population standard deviation.
-///
-/// # Arguments
-/// * `values` - Slice of f64 values
-///
-/// # Returns
-/// Population standard deviation, or NaN if input is empty or all NaN
-fn calculate_std_dev(values: &[f64]) -> f64 {
-    if values.is_empty() {
+/// Calculates the latest update value for returns based on available price points.
+pub fn calculate_returns_update(prices: &[TimeSeriesPoint]) -> f64 {
+    let closes: Vec<f64> = prices.iter().map(|point| point.close_price).collect();
+
+    if closes.len() < 2 {
         return f64::NAN;
     }
 
-    // Filter out NaN values
-    let valid_values: Vec<f64> = values.iter().filter(|&&v| !v.is_nan()).copied().collect();
+    let window = &closes[closes.len().saturating_sub(2)..];
+    log_return_window(window)
+}
 
-    if valid_values.is_empty() {
+/// Calculates the latest volatility update from the most recent returns.
+pub fn calculate_volatility_update(returns: &[TimeSeriesPoint], window_size: usize) -> f64 {
+    if returns.is_empty() || window_size == 0 {
         return f64::NAN;
     }
 
-    let n = valid_values.len() as f64;
+    let closes: Vec<f64> = returns.iter().map(|point| point.close_price).collect();
+    let start = closes.len().saturating_sub(window_size);
+    population_std_dev(&closes[start..])
+}
 
-    // Calculate mean
-    let mean = valid_values.iter().sum::<f64>() / n;
+/// Calculates an exponential moving average series.
+///
+/// The behavior mirrors an EMA window where the first output echoes the first
+/// input, and subsequent outputs combine the previous EMA result with the new
+/// value using the provided lambda.
+pub fn calculate_exponential_moving_average(
+    values: &[f64],
+    lambda: f64,
+    lookback: usize,
+) -> Vec<f64> {
+    if values.is_empty() || !(0.0 < lambda && lambda <= 1.0) {
+        return Vec::new();
+    }
 
-    // Calculate sum of squared differences
-    let sum_squared_diff: f64 = valid_values.iter().map(|&v| (v - mean).powi(2)).sum();
-
-    // Population standard deviation (divide by N, not N-1)
-    (sum_squared_diff / n).sqrt()
+    let window = ExponentialWindow::new(lambda, lookback);
+    let _ = window.burn_in();
+    window.apply(values, |previous, value| ema_step(previous, value, lambda))
 }
 
 /// Generates a unique node identifier hash from assets, analytic type, and date range.
@@ -390,6 +362,45 @@ pub fn execute_volatility_node(node: &Node, inputs: &[NodeOutput]) -> Result<Nod
     let result = prices_to_timeseries(&volatility, returns_data);
 
     Ok(NodeOutput::Single(result))
+}
+
+/// Executes a returns node in push-mode (update semantics) and returns the latest value.
+pub fn execute_returns_update(
+    _node: &Node,
+    inputs: &[Vec<TimeSeriesPoint>],
+) -> Result<NodeOutput, DagError> {
+    if inputs.is_empty() || inputs[0].len() < 2 {
+        return Err(DagError::ExecutionError(
+            "Returns update requires at least two price points".to_string(),
+        ));
+    }
+
+    let value = calculate_returns_update(&inputs[0]);
+    Ok(NodeOutput::Scalar(value))
+}
+
+/// Executes a volatility node in push-mode (update semantics) and returns the latest value.
+pub fn execute_volatility_update(
+    node: &Node,
+    inputs: &[Vec<TimeSeriesPoint>],
+) -> Result<NodeOutput, DagError> {
+    if inputs.is_empty() || inputs[0].is_empty() {
+        return Err(DagError::ExecutionError(
+            "Volatility update requires returns history".to_string(),
+        ));
+    }
+
+    let window_size = if let NodeParams::Map(ref params) = node.params {
+        params
+            .get("window_size")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10)
+    } else {
+        10
+    };
+
+    let value = calculate_volatility_update(&inputs[0], window_size);
+    Ok(NodeOutput::Scalar(value))
 }
 
 /// Calculates burn-in period needed for volatility calculation
@@ -1014,6 +1025,66 @@ mod tests {
                 }
             }
             _ => panic!("Expected Single output"),
+        }
+    }
+
+    #[test]
+    fn test_execute_returns_update_scalar() {
+        use chrono::Utc;
+
+        let price_data = vec![
+            TimeSeriesPoint::new(Utc::now(), 100.0),
+            TimeSeriesPoint::new(Utc::now(), 110.0),
+        ];
+
+        let node = create_returns_node(
+            NodeId(3),
+            AssetKey::new_equity("AAPL").unwrap(),
+            DateRange::new(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+            ),
+        );
+
+        let result = execute_returns_update(&node, &[price_data.clone()]).unwrap();
+
+        match result {
+            NodeOutput::Scalar(value) => {
+                let expected = (110.0 / 100.0).ln();
+                assert!((value - expected).abs() < 1e-12);
+            }
+            _ => panic!("Expected Scalar output"),
+        }
+    }
+
+    #[test]
+    fn test_execute_volatility_update_scalar() {
+        use chrono::Utc;
+
+        let returns_data = vec![
+            TimeSeriesPoint::new(Utc::now(), 0.01),
+            TimeSeriesPoint::new(Utc::now(), -0.01),
+            TimeSeriesPoint::new(Utc::now(), 0.02),
+            TimeSeriesPoint::new(Utc::now(), -0.02),
+        ];
+
+        let node = create_volatility_node(
+            NodeId(4),
+            AssetKey::new_equity("AAPL").unwrap(),
+            3,
+            DateRange::new(
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 4).unwrap(),
+            ),
+        );
+
+        let result = execute_volatility_update(&node, &[returns_data.clone()]).unwrap();
+
+        match result {
+            NodeOutput::Scalar(value) => {
+                assert!(value >= 0.0 || value.is_nan());
+            }
+            _ => panic!("Expected Scalar output"),
         }
     }
 
