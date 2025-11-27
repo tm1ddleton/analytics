@@ -16,7 +16,8 @@ mod integration_tests;
 
 pub use analytics::{
     apply_output_mode, calculate_exponential_moving_average, calculate_returns,
-    calculate_volatility, AnalyticsQuery, OutputMode, ReturnsQueryBuilder, VolatilityQueryBuilder,
+    calculate_volatility, AnalyticRegistry, AnalyticsQuery, OutputMode, ReturnsQueryBuilder,
+    VolatilityQueryBuilder,
 };
 pub use asset::{Asset, AssetType};
 pub use asset_key::AssetKey;

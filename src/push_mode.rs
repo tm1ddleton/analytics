@@ -4,10 +4,9 @@
 //! automatically update when new data arrives, propagating changes through
 //! the DAG dependency chain.
 
-use crate::analytics::{execute_returns_update, execute_volatility_update};
 use crate::asset_key::AssetKey;
-use crate::dag::{AnalyticsDag, DagError, Node, NodeId, NodeOutput, NodeParams};
-use crate::time_series::{DataProvider, DataProviderError, DateRange, TimeSeriesPoint};
+use crate::dag::{AnalyticsDag, Node, NodeId, NodeOutput, NodeParams};
+use crate::time_series::{DataProvider, DataProviderError, TimeSeriesPoint};
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
@@ -483,40 +482,20 @@ impl PushModeEngine {
     fn execute_node(
         &self,
         node_id: NodeId,
-        asset: AssetKey,
+        _asset: AssetKey,
         timestamp: DateTime<Utc>,
         value: f64,
     ) -> Result<NodeOutput, PushError> {
-        // Get the node from DAG
-        let node = self.get_node_from_dag(node_id)?;
+        // Ensure the node exists
+        self.get_node_from_dag(node_id)?;
 
-        match node.node_type.as_str() {
-            "data_provider" => {
-                // Create TimeSeriesPoint directly from incoming data
-                let point = TimeSeriesPoint::new(timestamp, value);
-                Ok(NodeOutput::Single(vec![point]))
-            }
-            "returns" => {
-                let inputs = self.get_parent_histories(node_id)?;
-                execute_returns_update(&node, &inputs).map_err(|e| PushError::PropagationFailed {
-                    node_id,
-                    error: e.to_string(),
-                })
-            }
-            "volatility" => {
-                let inputs = self.get_parent_histories(node_id)?;
-                execute_volatility_update(&node, &inputs).map_err(|e| {
-                    PushError::PropagationFailed {
-                        node_id,
-                        error: e.to_string(),
-                    }
-                })
-            }
-            _ => Err(PushError::PropagationFailed {
+        let inputs = self.get_parent_histories(node_id)?;
+        self.dag
+            .execute_push_node(node_id, &inputs, timestamp, value)
+            .map_err(|e| PushError::PropagationFailed {
                 node_id,
-                error: format!("Unknown node type: {}", node.node_type),
-            }),
-        }
+                error: e.to_string(),
+            })
     }
 
     /// Gets outputs from all parent nodes

@@ -4,10 +4,12 @@
 //! for wiring analytics dependencies explicitly with cycle detection, topological sorting,
 //! and parallel execution support.
 
-use crate::analytics::{calculate_returns, calculate_volatility};
+use crate::analytics::registry::{AnalyticExecutor, AnalyticRegistry};
 use crate::asset_key::AssetKey;
-use crate::dag::types::{Node, NodeId, NodeOutput, NodeParams};
+use crate::dag::types::{Node, NodeId, NodeKey, NodeOutput, NodeParams};
+use crate::dag::AnalyticType;
 use crate::time_series::{DataProvider, DataProviderError, DateRange, TimeSeriesPoint};
+use chrono::{DateTime, Utc};
 use daggy::{petgraph::Direction, Dag, EdgeIndex, NodeIndex, Walker};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,17 +124,31 @@ pub struct AnalyticsDag {
     next_node_id: usize,
     /// Cached topological sort result
     cached_toposort: Option<Vec<NodeId>>,
+    /// Map from NodeKey metadata to NodeId for deduplication
+    node_lookup: HashMap<NodeKey, NodeId>,
+    /// Map from NodeId to its NodeKey metadata (if registered)
+    node_keys_by_id: HashMap<NodeId, NodeKey>,
+    /// Registry defining analytic executors and dependencies
+    registry: Arc<AnalyticRegistry>,
 }
 
 impl AnalyticsDag {
-    /// Creates a new empty DAG
+    /// Creates a new empty DAG using the default registry.
     pub fn new() -> Self {
+        Self::new_with_registry(Arc::new(AnalyticRegistry::default()))
+    }
+
+    /// Creates a new DAG using the provided registry.
+    pub fn new_with_registry(registry: Arc<AnalyticRegistry>) -> Self {
         AnalyticsDag {
             dag: Dag::new(),
             node_id_to_index: HashMap::new(),
             index_to_node_id: HashMap::new(),
             next_node_id: 0,
             cached_toposort: None,
+            node_lookup: HashMap::new(),
+            node_keys_by_id: HashMap::new(),
+            registry,
         }
     }
 
@@ -164,6 +180,74 @@ impl AnalyticsDag {
         self.cached_toposort = None;
 
         node_id
+    }
+
+    /// Resolves or creates a node based on its metadata key and registered definitions.
+    pub fn resolve_node(&mut self, key: NodeKey) -> Result<NodeId, DagError> {
+        if let Some(&existing) = self.node_lookup.get(&key) {
+            return Ok(existing);
+        }
+
+        let definition = self.registry.definition(key.analytic).ok_or_else(|| {
+            DagError::InvalidOperation(format!("No analytic definition for {:?}", key.analytic))
+        })?;
+        let node_type_name = definition.node_type().to_string();
+        let dependency_keys = definition.dependencies(&key)?;
+        let _ = definition;
+        let mut dependency_ids = Vec::new();
+        for dep_key in dependency_keys {
+            let dep_id = self.resolve_node(dep_key)?;
+            dependency_ids.push(dep_id);
+        }
+
+        let params = NodeParams::Map(key.params_map());
+        let node_id = self.add_node(node_type_name, params, key.assets.clone());
+        self.node_lookup.insert(key.clone(), node_id);
+        self.node_keys_by_id.insert(node_id, key.clone());
+
+        for dep_id in dependency_ids {
+            self.add_edge(dep_id, node_id)?;
+        }
+
+        Ok(node_id)
+    }
+
+    /// Registers metadata for a manually-added node, allowing registry-driven execution.
+    pub fn register_node_key(&mut self, node_id: NodeId, key: NodeKey) -> Result<(), DagError> {
+        if !self.node_id_to_index.contains_key(&node_id) {
+            return Err(DagError::NodeNotFound(format!(
+                "Node {:?} not found for registration",
+                node_id
+            )));
+        }
+
+        self.node_lookup.insert(key.clone(), node_id);
+        self.node_keys_by_id.insert(node_id, key);
+
+        Ok(())
+    }
+
+    /// Retrieves the metadata key for a node, if registered.
+    pub fn node_key(&self, node_id: NodeId) -> Option<&NodeKey> {
+        self.node_keys_by_id.get(&node_id)
+    }
+
+    fn executor_for_node(
+        &self,
+        node: &Node,
+        node_id: NodeId,
+    ) -> Result<&dyn AnalyticExecutor, DagError> {
+        let analytic = if let Some(key) = self.node_key(node_id) {
+            key.analytic
+        } else {
+            AnalyticType::from_str(&node.node_type)
+        };
+
+        let definition = self.registry.definition(analytic).ok_or_else(|| {
+            DagError::InvalidOperation(format!("No analytic definition for {:?}", analytic))
+        })?;
+
+        Ok(definition.executor())
     }
 
     /// Adds an edge (dependency) between two nodes
@@ -269,6 +353,11 @@ impl AnalyticsDag {
 
         // Invalidate cache when DAG structure changes
         self.cached_toposort = None;
+
+        // Ensure key map no longer points to the removed node
+        self.node_lookup
+            .retain(|_, &mut existing_node| existing_node != node_id);
+        self.node_keys_by_id.remove(&node_id);
 
         Ok(())
     }
@@ -896,10 +985,6 @@ impl AnalyticsDag {
 
         // Execute nodes in topological order with extended date range
         for &current_id in &nodes_to_execute {
-            let current_node = self.get_node(current_id).ok_or_else(|| {
-                DagError::NodeNotFound(format!("Node {} not found", current_id.0))
-            })?;
-
             // Get parent outputs from cache
             let parents = self.get_parents(current_id);
             let parent_outputs: Vec<Vec<TimeSeriesPoint>> = parents
@@ -908,12 +993,8 @@ impl AnalyticsDag {
                 .collect();
 
             // Execute the node based on its type (using extended range for data loading)
-            let result = self.execute_node_pull_mode(
-                current_node,
-                &parent_outputs,
-                &extended_range,
-                provider,
-            )?;
+            let result =
+                self.execute_pull_node(current_id, &parent_outputs, &extended_range, provider)?;
 
             // Cache the result with its extended range
             cache.insert(current_id, result, extended_range.clone());
@@ -1021,104 +1102,32 @@ impl AnalyticsDag {
         Ok(results.into_inner().unwrap())
     }
 
-    /// Helper function to execute a single node in pull-mode
-    fn execute_node_pull_mode(
+    fn execute_pull_node(
         &self,
-        node: &Node,
+        node_id: NodeId,
         parent_outputs: &[Vec<TimeSeriesPoint>],
         date_range: &DateRange,
         provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        // Handle DataProvider nodes (both capitalized and lowercase for compatibility)
-        if node.node_type == "DataProvider"
-            || node.node_type == "data_provider"
-            || node.node_type.contains("DataProvider")
-            || node.node_type.contains("data_provider")
-        {
-            if let Some(asset) = node.assets.first() {
-                let data = provider.get_time_series(asset, date_range)?;
-                return Ok(data);
-            } else {
-                return Err(DagError::ExecutionError(
-                    "DataProvider node has no assets".to_string(),
-                ));
-            }
-        }
+        let node = self
+            .get_node(node_id)
+            .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
+        let executor = self.executor_for_node(node, node_id)?;
+        executor.execute_pull(node, parent_outputs, date_range, provider)
+    }
 
-        match node.node_type.as_str() {
-            "Returns" | "returns" => {
-                // Calculate returns from parent data (prices)
-                if parent_outputs.is_empty() {
-                    return Err(DagError::ExecutionError(
-                        "Returns node requires parent data".to_string(),
-                    ));
-                }
-
-                let prices_data = &parent_outputs[0];
-                if prices_data.is_empty() {
-                    return Ok(Vec::new());
-                }
-
-                // Extract prices
-                let prices: Vec<f64> = prices_data.iter().map(|p| p.close_price).collect();
-
-                // Calculate returns (same length as prices, first element is NaN)
-                let returns = calculate_returns(&prices);
-
-                // Convert back to TimeSeriesPoint
-                // Returns has same length as prices (first is NaN, converted to 0 by analytics function)
-                let result: Vec<TimeSeriesPoint> = prices_data
-                    .iter()
-                    .zip(returns.iter())
-                    .map(|(point, &ret)| TimeSeriesPoint::new(point.timestamp, ret))
-                    .collect();
-
-                Ok(result)
-            }
-            "Volatility" | "volatility" => {
-                // Calculate volatility from parent data (returns)
-                if parent_outputs.is_empty() {
-                    return Err(DagError::ExecutionError(
-                        "Volatility node requires parent data".to_string(),
-                    ));
-                }
-
-                let returns_data = &parent_outputs[0];
-                if returns_data.is_empty() {
-                    return Ok(Vec::new());
-                }
-
-                // Extract window size from node params
-                let window_size = if let NodeParams::Map(ref params) = node.params {
-                    params
-                        .get("window_size")
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(10) // Default to 10
-                } else {
-                    10 // Default window size
-                };
-
-                // Extract returns
-                let returns: Vec<f64> = returns_data.iter().map(|p| p.close_price).collect();
-
-                // Calculate volatility (same length as returns)
-                let volatility = calculate_volatility(&returns, window_size);
-
-                // Convert back to TimeSeriesPoint
-                // Volatility has same length as returns (early values are NaN until window is full)
-                let result: Vec<TimeSeriesPoint> = returns_data
-                    .iter()
-                    .zip(volatility.iter())
-                    .map(|(point, &vol)| TimeSeriesPoint::new(point.timestamp, vol))
-                    .collect();
-
-                Ok(result)
-            }
-            _ => Err(DagError::ExecutionError(format!(
-                "Unsupported node type: {}",
-                node.node_type
-            ))),
-        }
+    pub(crate) fn execute_push_node(
+        &self,
+        node_id: NodeId,
+        parent_outputs: &[Vec<TimeSeriesPoint>],
+        timestamp: DateTime<Utc>,
+        value: f64,
+    ) -> Result<NodeOutput, DagError> {
+        let node = self
+            .get_node(node_id)
+            .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
+        let executor = self.executor_for_node(node, node_id)?;
+        executor.execute_push(node, parent_outputs, timestamp, value)
     }
 }
 

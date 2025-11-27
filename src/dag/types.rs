@@ -71,6 +71,23 @@ pub struct WindowSpec {
 }
 
 impl WindowSpec {
+    pub fn fixed(size: usize) -> Self {
+        WindowSpec {
+            kind: WindowKind::Fixed { size },
+        }
+    }
+
+    pub fn exponential(lambda: f64, lookback: usize) -> Self {
+        WindowSpec {
+            kind: WindowKind::Exponential {
+                lambda: OrderedFloat(lambda),
+                lookback,
+            },
+        }
+    }
+}
+
+impl WindowSpec {
     pub fn burn_in(&self) -> usize {
         match self.kind {
             WindowKind::Fixed { size } => size,
@@ -96,6 +113,10 @@ impl NodeKey {
         map.insert("analytic_type".to_string(), self.analytic.to_string());
         if let Some(tag) = &self.override_tag {
             map.insert("override".to_string(), tag.clone());
+        }
+        if let Some(range) = &self.range {
+            map.insert("start_date".to_string(), range.start.to_string());
+            map.insert("end_date".to_string(), range.end.to_string());
         }
         if let Some(window) = &self.window {
             match window.kind {

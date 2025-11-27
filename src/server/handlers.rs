@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use super::error::ApiError;
 use super::state::{AnalyticConfig, AppState, ReplaySession, SessionStatus};
+use crate::analytics::AnalyticRegistry;
 use crate::asset_key::AssetKey;
-use crate::dag::{AnalyticsDag, NodeId, NodeOutput, NodeParams};
+use crate::dag::{AnalyticType, AnalyticsDag, NodeId, NodeKey, NodeOutput, WindowSpec};
 use crate::time_series::DateRange;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -218,62 +219,54 @@ pub async fn get_asset_data(
 fn build_analytics_dag(
     asset: &AssetKey,
     analytic_type: &str,
+    date_range: &DateRange,
     params: &HashMap<String, String>,
 ) -> Result<(AnalyticsDag, NodeId), ApiError> {
-    let mut dag = AnalyticsDag::new();
+    let analytic = AnalyticType::from_str(analytic_type);
+    let registry = AnalyticRegistry::default();
 
-    // Use lowercase node types for push-mode compatibility
-    let data_node = dag.add_node(
-        "data_provider".to_string(),
-        NodeParams::None,
-        vec![asset.clone()],
-    );
+    if registry.definition(analytic).is_none() {
+        return Err(ApiError::InvalidParameter(format!(
+            "Unknown analytic type: {}",
+            analytic_type
+        )));
+    }
 
-    match analytic_type {
-        "returns" => {
-            let returns_node =
-                dag.add_node("returns".to_string(), NodeParams::None, vec![asset.clone()]);
-            dag.add_edge(data_node, returns_node)
-                .map_err(|e| ApiError::InternalError(e.to_string()))?;
-            Ok((dag, returns_node))
-        }
-        "volatility" => {
-            let window = params
-                .get("window")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+    let mut node_params = params.clone();
+    let window_param = params
+        .get("window")
+        .and_then(|value| value.parse::<usize>().ok());
 
-            if window == 0 {
+    let window_spec = match analytic {
+        AnalyticType::Volatility => {
+            let window_size = window_param.unwrap_or(10);
+            if window_size == 0 {
                 return Err(ApiError::InvalidParameter(
                     "Window size must be greater than 0".to_string(),
                 ));
             }
-
-            // Build: data_provider -> returns -> volatility
-            let returns_node =
-                dag.add_node("returns".to_string(), NodeParams::None, vec![asset.clone()]);
-
-            let mut vol_params_map = HashMap::new();
-            vol_params_map.insert("window_size".to_string(), window.to_string());
-
-            let vol_node = dag.add_node(
-                "volatility".to_string(),
-                NodeParams::Map(vol_params_map),
-                vec![asset.clone()],
-            );
-
-            dag.add_edge(data_node, returns_node)
-                .map_err(|e| ApiError::InternalError(e.to_string()))?;
-            dag.add_edge(returns_node, vol_node)
-                .map_err(|e| ApiError::InternalError(e.to_string()))?;
-
-            Ok((dag, vol_node))
+            node_params.insert("window_size".to_string(), window_size.to_string());
+            Some(WindowSpec::fixed(window_size))
         }
-        _ => Err(ApiError::InvalidParameter(format!(
-            "Unknown analytic type: {}",
-            analytic_type
-        ))),
-    }
+        AnalyticType::Returns => Some(WindowSpec::fixed(2)),
+        _ => None,
+    };
+
+    let node_key = NodeKey {
+        analytic,
+        assets: vec![asset.clone()],
+        range: Some(date_range.clone()),
+        window: window_spec,
+        override_tag: None,
+        params: node_params,
+    };
+
+    let mut dag = AnalyticsDag::new();
+    let target_node = dag
+        .resolve_node(node_key)
+        .map_err(|e| ApiError::ComputationFailed(e.to_string()))?;
+
+    Ok((dag, target_node))
 }
 
 /// Query parameters for analytics endpoint
@@ -331,11 +324,11 @@ pub async fn get_analytics(
         params.insert("window".to_string(), window.to_string());
     }
 
-    // Build DAG
-    let (dag, target_node) = build_analytics_dag(&asset_key, &analytic_type, &params)?;
-
     // Create date range
     let date_range = DateRange::new(start_date, end_date);
+
+    // Build DAG
+    let (dag, target_node) = build_analytics_dag(&asset_key, &analytic_type, &date_range, &params)?;
 
     // Execute pull-mode query
     let provider = state.data_provider.lock().await;
@@ -436,11 +429,12 @@ async fn execute_single_batch_query(
     let asset_key = AssetKey::new_equity(&query.asset)
         .map_err(|e| ApiError::InvalidParameter(format!("Invalid asset: {}", e)))?;
 
-    // Build DAG
-    let (dag, target_node) = build_analytics_dag(&asset_key, &query.analytic, &query.parameters)?;
-
     // Create date range
     let date_range = DateRange::new(start_date, end_date);
+
+    // Build DAG
+    let (dag, target_node) =
+        build_analytics_dag(&asset_key, &query.analytic, &date_range, &query.parameters)?;
 
     // Execute pull-mode query
     let provider = state.data_provider.lock().await;
@@ -686,6 +680,7 @@ pub async fn handle_stream(
 
     // Clone state for background task
     let state_clone = state.clone();
+    let replay_range = DateRange::new(start_date, end_date);
 
     // Spawn task to run real push-mode replay
     tokio::spawn(async move {
@@ -707,7 +702,8 @@ pub async fn handle_stream(
                 }
 
                 // Build DAG for this asset and analytic
-                let dag_result = build_analytics_dag(asset_key, &analytic.analytic_type, &params);
+                let dag_result =
+                    build_analytics_dag(asset_key, &analytic.analytic_type, &replay_range, &params);
                 if let Err(e) = dag_result {
                     tracing::error!("Replay: Failed to build DAG: {}", e);
                     continue;
@@ -730,7 +726,7 @@ pub async fn handle_stream(
 
                 // Load all data for this asset in the date range
                 use crate::time_series::DataProvider;
-                let date_range = DateRange::new(start_date, end_date);
+                let date_range = replay_range.clone();
                 let all_data = match (*provider).get_time_series(asset_key, &date_range) {
                     Ok(data) => data,
                     Err(e) => {
