@@ -1,4 +1,4 @@
-use crate::analytics::calculators::{
+use crate::analytics::containers::{
     LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
 };
 use crate::analytics::lag::{FixedLag, LagAnalytic};

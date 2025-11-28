@@ -8,6 +8,7 @@ import ReactFlow, {
   type Node,
   type Edge,
   type NodeTypes,
+  SmoothStepEdge,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { Box, Paper, Typography, Link, Chip, CircularProgress, Alert } from '@mui/material';
@@ -100,25 +101,41 @@ const nodeTypes: NodeTypes = {
   dagNode: DagNode,
 };
 
-// Layout algorithm using dagre
+// Edge types for React Flow - use smoothstep for better routing
+const edgeTypes = {
+  smoothstep: SmoothStepEdge,
+};
+
+// Layout algorithm using dagre with improved spacing for edge routing
 function getLayoutedElements(
   nodes: VisualizationNode[],
   edges: { source: number; target: number }[]
 ) {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
-  // Left to right layout with increased spacing to prevent overlap
+  
+  // Left to right layout with increased spacing to prevent edge-node crossings
+  // Increased spacing gives edges more room to route around nodes
+  const nodeWidth = 220;
+  const nodeHeight = 200;
+  // Add substantial padding to ensure edges have clear paths between nodes
+  // This prevents edges from crossing through node boxes
+  const horizontalPadding = 150; // Space for edges to route horizontally (increased for better clearance)
+  const verticalPadding = 120;   // Space for edges to route vertically (increased for better clearance)
+  
   dagreGraph.setGraph({ 
     rankdir: 'LR',  // Left to right
-    nodesep: 100,   // Horizontal spacing between nodes
-    ranksep: 150,   // Vertical spacing between ranks
+    nodesep: nodeWidth + horizontalPadding,   // Horizontal spacing between nodes (node width + padding)
+    ranksep: nodeHeight + verticalPadding,    // Vertical spacing between ranks (node height + padding)
     marginx: 50,     // Horizontal margin
     marginy: 50,    // Vertical margin
+    acyclicer: 'greedy', // Ensure acyclic graph
+    ranker: 'tight-tree', // Better ranking algorithm for clearer layout
+    // Increase edge separation to prevent overlaps
+    edgesep: 50,    // Minimum separation between parallel edges
   });
 
   // Add nodes to dagre graph with actual dimensions
-  const nodeWidth = 220;
-  const nodeHeight = 200;
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id.toString(), { 
       width: nodeWidth, 
@@ -147,12 +164,19 @@ function getLayoutedElements(
     };
   });
 
+  // Use smoothstep edges which route better and avoid crossing node centers
+  // smoothstep edges create stepped paths that naturally avoid node boxes
   const layoutedEdges: Edge[] = edges.map((edge, index) => ({
     id: `e${edge.source}-${edge.target}-${index}`,
     source: edge.source.toString(),
     target: edge.target.toString(),
+    type: 'smoothstep', // Stepped edges that route around obstacles better
     animated: true,
     style: { stroke: '#1976d2', strokeWidth: 2 },
+    markerEnd: {
+      type: 'arrowclosed',
+      color: '#1976d2',
+    },
   }));
 
   return { nodes: layoutedNodes, edges: layoutedEdges };
@@ -207,9 +231,17 @@ export function DagVisualization({ dag, loading, error }: DagVisualizationProps)
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 1.5 }}
         attributionPosition="bottom-left"
+        defaultEdgeOptions={{
+          type: 'smoothstep',
+          animated: true,
+        }}
+        connectionLineType="smoothstep"
+        // Prevent edges from intersecting with nodes by using proper routing
+        nodeExtent={undefined} // Allow nodes anywhere
       >
         <Controls />
         <MiniMap />

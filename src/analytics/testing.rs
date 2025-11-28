@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::analytics::calculators::{
+use crate::analytics::containers::{
     LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
 };
 use crate::time_series::TimeSeriesPoint;

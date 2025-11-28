@@ -6,7 +6,7 @@
 //! - Compare with push-mode (which updates incrementally)
 
 use analytics::{
-    analytics::calculators::{
+    analytics::containers::{
         LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic, VolatilityAnalytic,
     },
     AssetKey, DateRange, VolatilityQueryBuilder,

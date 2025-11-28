@@ -9,7 +9,7 @@
 //! Run with: cargo run --example replay_volatility
 
 use analytics::{
-    analytics::calculators::{StdDevVolatilityAnalytic, VolatilityAnalytic},
+    analytics::containers::{StdDevVolatilityAnalytic, VolatilityAnalytic},
     AssetKey, DateRange, InMemoryDataProvider, ReplayEngine, TimeSeriesPoint,
 };
 use chrono::{NaiveDate, TimeZone, Utc};

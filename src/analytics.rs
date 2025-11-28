@@ -4,6 +4,7 @@
 //! returns and volatility calculations. These functions operate on raw f64
 //! arrays for performance and are designed to integrate with the DAG framework.
 
+pub mod containers;
 pub mod calculators;
 mod lag;
 pub mod registry;
@@ -20,6 +21,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use windows::{ExponentialWindow, WindowStrategy};
 
+pub use containers::{
+    ArithReturnAnalytic, LogReturnAnalytic, ReturnAnalytic, StdDevVolatilityAnalytic,
+    VolatilityAnalytic,
+};
 pub use lag::LagAnalytic;
 pub use registry::AnalyticRegistry;
 
@@ -50,7 +55,7 @@ pub enum OutputMode {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::calculators::{LogReturnAnalytic, ReturnAnalytic};
+/// use analytics::analytics::containers::{LogReturnAnalytic, ReturnAnalytic};
 ///
 /// let primitive = LogReturnAnalytic;
 /// let returns = ReturnAnalytic::compute(&primitive, None, 105.0, 100.0);
@@ -80,7 +85,7 @@ pub enum OutputMode {
 ///
 /// # Examples
 /// ```
-/// use analytics::analytics::calculators::{StdDevVolatilityAnalytic, VolatilityAnalytic};
+/// use analytics::analytics::containers::{StdDevVolatilityAnalytic, VolatilityAnalytic};
 ///
 /// let primitive = StdDevVolatilityAnalytic;
 /// let value = VolatilityAnalytic::compute(&primitive, None, &[0.01, -0.02, 0.015]);
