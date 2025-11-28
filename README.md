@@ -166,6 +166,11 @@ analytics/
 │   ├── yahoo_finance.rs       # Data ingestion
 │   ├── dag.rs                 # DAG framework
 │   ├── analytics.rs           # Analytics functions
+│   ├── analytics/             # Analytics module
+│   │   ├── calculators.rs     # Pure mathematical functions
+│   │   ├── containers.rs      # Analytic interface definitions
+│   │   ├── registry.rs        # Executors and orchestration
+│   │   └── README.md          # Architecture philosophy ✨
 │   ├── push_mode.rs           # Push-mode engine
 │   ├── replay.rs              # Replay system
 │   └── server/                # REST API
@@ -185,6 +190,15 @@ analytics/
 ├── docs/                       # API documentation
 └── run-demo.sh                # Demo launcher
 ```
+
+### Analytics Module Architecture
+
+The analytics module follows a three-layer architecture:
+- **Calculators**: Pure stateless functions defining the mathematics
+- **Containers**: Traits defining what inputs are required for each analytic
+- **Executors**: Orchestration layer that stitches nodes together and runs analytics
+
+See [`src/analytics/README.md`](src/analytics/README.md) for detailed architecture documentation.
 
 ## 🔧 API Examples
 
