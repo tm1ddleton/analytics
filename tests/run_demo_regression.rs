@@ -1,9 +1,11 @@
-use analytics::dag::{AnalyticsDag, NodeParams};
+use analytics::dag::AnalyticsDag;
+use analytics::dag::types::{AnalyticType, NodeKey};
 use analytics::push_mode::PushModeEngine;
 use analytics::sqlite_provider::SqliteDataProvider;
 use analytics::time_series::{DateRange, InMemoryDataProvider, TimeSeriesPoint};
 use analytics::{AssetKey, Equity, NodeOutput};
 use chrono::{Duration, TimeZone, Utc};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 fn sample_prices() -> Vec<TimeSeriesPoint> {
@@ -25,22 +27,20 @@ fn run_demo_pull_mode_returns() {
         .insert_time_series_batch(&asset_key, &points)
         .unwrap();
 
-    let mut dag = AnalyticsDag::new();
-    let data_node = dag.add_node(
-        "data_provider".to_string(),
-        NodeParams::None,
-        vec![asset_key.clone()],
-    );
-    let returns_node = dag.add_node(
-        "returns".to_string(),
-        NodeParams::None,
-        vec![asset_key.clone()],
-    );
-    dag.add_edge(data_node, returns_node).unwrap();
-
     let start_date = points.first().unwrap().timestamp.date_naive();
     let end_date = points.last().unwrap().timestamp.date_naive();
     let range = DateRange::new(start_date, end_date);
+
+    let mut dag = AnalyticsDag::new();
+    let returns_key = NodeKey {
+        analytic: AnalyticType::Returns,
+        assets: vec![asset_key.clone()],
+        range: Some(range.clone()),
+        window: None,
+        override_tag: None,
+        params: HashMap::new(),
+    };
+    let returns_node = dag.resolve_node(returns_key).unwrap();
 
     let result = dag
         .execute_pull_mode(returns_node, range, &provider)
@@ -60,17 +60,20 @@ fn run_demo_pull_mode_returns() {
 fn run_demo_push_mode_returns_updates() {
     let asset_key = AssetKey::new_equity("AAPL").unwrap();
     let mut dag = AnalyticsDag::new();
-    let data_node = dag.add_node(
-        "data_provider".to_string(),
-        NodeParams::None,
-        vec![asset_key.clone()],
+    // Push mode doesn't need a specific range, but the registry requires one
+    let dummy_range = DateRange::new(
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap().date_naive(),
+        Utc.with_ymd_and_hms(2024, 12, 31, 0, 0, 0).unwrap().date_naive(),
     );
-    let returns_node = dag.add_node(
-        "returns".to_string(),
-        NodeParams::None,
-        vec![asset_key.clone()],
-    );
-    dag.add_edge(data_node, returns_node).unwrap();
+    let returns_key = NodeKey {
+        analytic: AnalyticType::Returns,
+        assets: vec![asset_key.clone()],
+        range: Some(dummy_range),
+        window: None,
+        override_tag: None,
+        params: HashMap::new(),
+    };
+    let returns_node = dag.resolve_node(returns_key).unwrap();
 
     let mut engine = PushModeEngine::new(dag);
     let provider = InMemoryDataProvider::new();

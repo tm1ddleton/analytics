@@ -3410,8 +3410,10 @@ mod tests {
     #[test]
     fn test_integration_returns_matches_analytics_function() {
         use crate::analytics::testing::calculate_returns;
+        use crate::dag::types::{AnalyticType, NodeKey};
         use crate::time_series::InMemoryDataProvider;
         use chrono::{NaiveDate, TimeZone, Utc};
+        use std::collections::HashMap;
 
         let mut dag = AnalyticsDag::new();
         let aapl = AssetKey::new_equity("AAPL").unwrap();
@@ -3432,14 +3434,19 @@ mod tests {
             .collect();
         provider.add_data(aapl.clone(), test_data);
 
-        // Set up DAG
-        let data_node = dag.add_node(
-            "DataProvider".to_string(),
-            NodeParams::None,
-            vec![aapl.clone()],
-        );
-        let returns_node = dag.add_node("Returns".to_string(), NodeParams::None, vec![aapl]);
-        dag.add_edge(data_node, returns_node).unwrap();
+        // Set up DAG using registry-based approach (automatically creates Lag node)
+        let returns_key = NodeKey {
+            analytic: AnalyticType::Returns,
+            assets: vec![aapl.clone()],
+            range: Some(DateRange::new(
+                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2024, 1, 5).unwrap(),
+            )),
+            window: None,
+            override_tag: None,
+            params: HashMap::new(),
+        };
+        let returns_node = dag.resolve_node(returns_key).unwrap();
 
         // Execute pull-mode
         let result = dag

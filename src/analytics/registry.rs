@@ -193,47 +193,87 @@ impl AnalyticDefinition for DataProviderDefinition {
     }
 }
 
+/// Generic executor that merges multiple parent outputs and applies a function to them.
 struct MergeExecutor {
     sources: Vec<AnalyticType>,
-    pull_fn: Arc<
-        dyn Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<Vec<TimeSeriesPoint>, DagError>
-            + Send
-            + Sync,
-    >,
-    push_fn: Arc<
-        dyn Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<NodeOutput, DagError> + Send + Sync,
-    >,
+    compute_fn: Arc<dyn Fn(&Node, &[Option<&TimeSeriesPoint>]) -> f64 + Send + Sync>,
 }
 
 impl MergeExecutor {
     fn new(
         sources: Vec<AnalyticType>,
-        pull_fn: impl Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<Vec<TimeSeriesPoint>, DagError>
-            + Send
-            + Sync
-            + 'static,
-        push_fn: impl Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<NodeOutput, DagError>
-            + Send
-            + Sync
-            + 'static,
+        compute_fn: impl Fn(&Node, &[Option<&TimeSeriesPoint>]) -> f64 + Send + Sync + 'static,
     ) -> Self {
         MergeExecutor {
             sources,
-            pull_fn: Arc::new(pull_fn),
-            push_fn: Arc::new(push_fn),
+            compute_fn: Arc::new(compute_fn),
         }
     }
 
-    fn gather<'a>(&self, parent_outputs: &'a [ParentOutput]) -> Vec<Option<&'a [TimeSeriesPoint]>> {
+    fn gather<'a>(&self, parent_outputs: &'a [ParentOutput]) -> Vec<&'a [TimeSeriesPoint]> {
         let mut slices = Vec::with_capacity(self.sources.len());
         for analytic in &self.sources {
             let slice = parent_outputs
                 .iter()
                 .find(|parent| parent.analytic == *analytic)
-                .map(|parent| parent.output.as_slice());
+                .map(|parent| parent.output.as_slice())
+                .unwrap_or(&[]);
             slices.push(slice);
         }
         slices
+    }
+
+    fn series_for_slices(
+        &self,
+        node: &Node,
+        slices: &[&[TimeSeriesPoint]],
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        if slices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Find the maximum length to process all inputs (some might be shorter)
+        let max_len = slices.iter().map(|s| s.len()).max().unwrap_or(0);
+        if max_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut result = Vec::with_capacity(max_len);
+        for i in 0..max_len {
+            // Align points at index i from each slice
+            let aligned_points: Vec<Option<&TimeSeriesPoint>> =
+                slices.iter().map(|s| s.get(i)).collect();
+
+            // Get timestamp from first available point
+            let timestamp = aligned_points
+                .iter()
+                .find_map(|p| p.map(|pt| pt.timestamp))
+                .unwrap_or_else(|| Utc::now());
+
+            let value = (self.compute_fn)(node, &aligned_points);
+            result.push(TimeSeriesPoint::new(timestamp, value));
+        }
+
+        Ok(result)
+    }
+
+    fn scalar_for_slices(
+        &self,
+        node: &Node,
+        slices: &[&[TimeSeriesPoint]],
+    ) -> Result<NodeOutput, DagError> {
+        if slices.is_empty() {
+            return Err(DagError::ExecutionError(
+                "Merge executor requires at least one input".to_string(),
+            ));
+        }
+
+        // Align last points from each slice
+        let aligned_points: Vec<Option<&TimeSeriesPoint>> =
+            slices.iter().map(|s| s.last()).collect();
+
+        let value = (self.compute_fn)(node, &aligned_points);
+        Ok(NodeOutput::Scalar(value))
     }
 }
 
@@ -246,7 +286,7 @@ impl AnalyticExecutor for MergeExecutor {
         _provider: &dyn DataProvider,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
         let slices = self.gather(parent_outputs);
-        (self.pull_fn)(node, &slices)
+        self.series_for_slices(node, &slices)
     }
 
     fn execute_push(
@@ -257,7 +297,7 @@ impl AnalyticExecutor for MergeExecutor {
         _value: f64,
     ) -> Result<NodeOutput, DagError> {
         let slices = self.gather(parent_outputs);
-        (self.push_fn)(node, &slices)
+        self.scalar_for_slices(node, &slices)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -272,85 +312,26 @@ struct ReturnsDefinition {
 impl ReturnsDefinition {
     fn new() -> Self {
         let primitive = Arc::new(LogReturnAnalytic);
-        let merge_executor = MergeExecutor::new(
-            vec![AnalyticType::DataProvider, AnalyticType::Lag],
-            {
-                let primitive = primitive.clone();
-                #[allow(unused_assignments)]
-                move |node, slices| {
-                    let prices = slices[0].ok_or_else(|| {
-                        DagError::ExecutionError("Returns node requires price input".to_string())
-                    })?;
-                    let mut fallback_lag: Option<Vec<TimeSeriesPoint>> = None;
-                    let lag_slice = if let Some(lagged) = slices[1] {
-                        lagged
-                    } else {
-                        let lag = parse_lag_from_params(&node.params);
-                        fallback_lag = Some(build_lag_series(prices, lag));
-                        fallback_lag.as_ref().unwrap().as_slice()
-                    };
-                    let _ = &fallback_lag;
-                    if lag_slice.is_empty() {
-                        return Ok(Vec::new());
-                    }
-                    let asset = node.assets.first().ok_or_else(|| {
-                        DagError::ExecutionError("Returns node missing asset".to_string())
-                    })?;
-                    let length = std::cmp::min(prices.len(), lag_slice.len());
-                    let mut result = Vec::with_capacity(length);
-                    for (price, lag_point) in prices.iter().zip(lag_slice.iter()).take(length) {
-                        let value = if price.close_price.is_nan() || lag_point.close_price.is_nan()
-                        {
-                            f64::NAN
-                        } else {
-                            primitive.compute(Some(asset), price.close_price, lag_point.close_price)
-                        };
-                        result.push(TimeSeriesPoint::new(price.timestamp, value));
-                    }
-                    Ok(result)
-                }
-            },
-            {
-                let primitive = primitive.clone();
-                #[allow(unused_assignments)]
-                move |node, slices| {
-                    let prices = slices[0].ok_or_else(|| {
-                        DagError::ExecutionError("Returns update requires price input".to_string())
-                    })?;
-                    let mut fallback_lag: Option<Vec<TimeSeriesPoint>> = None;
-                    let lag_slice = if let Some(lagged) = slices[1] {
-                        lagged
-                    } else {
-                        let lag = parse_lag_from_params(&node.params);
-                        fallback_lag = Some(build_lag_series(prices, lag));
-                        fallback_lag.as_ref().unwrap().as_slice()
-                    };
-                    let _ = &fallback_lag;
-                    if lag_slice.is_empty() {
-                        return Err(DagError::ExecutionError(
-                            "Returns update requires input price and lagged values".to_string(),
-                        ));
-                    }
-                    let asset = node.assets.first().ok_or_else(|| {
-                        DagError::ExecutionError("Returns node missing asset".to_string())
-                    })?;
-                    let price_point = prices.last().unwrap();
-                    let lag_point = lag_slice.last().unwrap();
-                    if price_point.close_price.is_nan() || lag_point.close_price.is_nan() {
-                        Ok(NodeOutput::Scalar(f64::NAN))
-                    } else {
-                        Ok(NodeOutput::Scalar(primitive.compute(
-                            Some(asset),
-                            price_point.close_price,
-                            lag_point.close_price,
-                        )))
-                    }
-                }
-            },
-        );
-
         ReturnsDefinition {
-            executor: Box::new(merge_executor),
+            executor: Box::new(MergeExecutor::new(
+                vec![AnalyticType::DataProvider, AnalyticType::Lag],
+                {
+                    let primitive = primitive.clone();
+                    move |node, aligned_points| {
+                        match (aligned_points.get(0), aligned_points.get(1)) {
+                            (Some(Some(price)), Some(Some(lag))) => {
+                                if price.close_price.is_nan() || lag.close_price.is_nan() {
+                                    f64::NAN
+                                } else {
+                                    let asset = node.assets.first();
+                                    primitive.compute(asset, price.close_price, lag.close_price)
+                                }
+                            }
+                            _ => f64::NAN,
+                        }
+                    }
+                },
+            )),
         }
     }
 }
