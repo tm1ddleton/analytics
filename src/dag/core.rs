@@ -14,6 +14,7 @@ use daggy::{petgraph::Direction, Dag, EdgeIndex, NodeIndex, Walker};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, trace};
 
 /// Error types for DAG operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,9 +53,22 @@ impl AnalyticsDag {
         data_points: &[TimeSeriesPoint],
         target_node: NodeId,
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        debug!(
+            data_point_count = data_points.len(),
+            nodes_to_execute = nodes_to_execute.len(),
+            target_node = target_node.0,
+            "Starting push-mode simulation from calendar"
+        );
+        
         let mut push_history: HashMap<NodeId, Vec<TimeSeriesPoint>> = HashMap::new();
 
-        for point in data_points {
+        for (idx, point) in data_points.iter().enumerate() {
+            trace!(
+                point_index = idx,
+                timestamp = %point.timestamp,
+                value = point.close_price,
+                "Processing data point"
+            );
             for &node_id in nodes_to_execute {
                 let parent_histories: Vec<ParentOutput> = self
                     .get_parents(node_id)
@@ -90,11 +104,25 @@ impl AnalyticsDag {
                         .entry(node_id)
                         .or_insert_with(Vec::new)
                         .append(&mut points);
+                    
+                    trace!(
+                        node_id = node_id.0,
+                        point_index = idx,
+                        output_points = points.len(),
+                        "Node output collected"
+                    );
                 }
             }
         }
 
-        Ok(push_history.get(&target_node).cloned().unwrap_or_default())
+        let result = push_history.get(&target_node).cloned().unwrap_or_default();
+        debug!(
+            target_node = target_node.0,
+            result_count = result.len(),
+            "Push-mode simulation complete"
+        );
+        
+        Ok(result)
     }
 
     fn node_output_to_timeseries(
@@ -1076,6 +1104,13 @@ impl AnalyticsDag {
     ) -> Result<Vec<TimeSeriesPoint>, DagError> {
         use chrono::Duration;
 
+        debug!(
+            target_node = node_id.0,
+            start_date = %date_range.start,
+            end_date = %date_range.end,
+            "Starting pull-mode execution"
+        );
+
         // Verify target node exists
         let _target_node = self
             .get_node(node_id)
@@ -1087,6 +1122,13 @@ impl AnalyticsDag {
         // Extend date range backward for burn-in
         let extended_start = date_range.start - Duration::days(burnin_days as i64);
         let extended_range = DateRange::new(extended_start, date_range.end);
+        
+        debug!(
+            burnin_days = burnin_days,
+            extended_start = %extended_range.start,
+            extended_end = %extended_range.end,
+            "Extended date range for burn-in"
+        );
 
         // Get topological order to determine execution sequence
         let execution_order = self.execution_order_immutable()?;
@@ -1111,6 +1153,12 @@ impl AnalyticsDag {
                 )
             })?;
 
+        debug!(
+            nodes_to_execute = nodes_to_execute.len(),
+            data_node = data_node_id.0,
+            "Querying data provider for time series"
+        );
+
         // Query the whole time series from the data provider upfront
         let data_node = self
             .get_node(*data_node_id)
@@ -1118,6 +1166,11 @@ impl AnalyticsDag {
         let executor = self.executor_for_node(data_node, *data_node_id)?;
         let parent_outputs: Vec<ParentOutput> = Vec::new(); // Data provider has no parents
         let data_points = executor.execute_pull(data_node, &parent_outputs, &extended_range, provider)?;
+        
+        debug!(
+            data_point_count = data_points.len(),
+            "Data provider returned time series, starting push-mode simulation"
+        );
 
         // Now iterate point by point like push mode, collecting results
         let simulated =
@@ -1131,6 +1184,12 @@ impl AnalyticsDag {
                 date >= date_range.start && date <= date_range.end
             })
             .collect();
+
+        debug!(
+            target_node = node_id.0,
+            result_count = filtered_result.len(),
+            "Pull-mode execution complete"
+        );
 
         Ok(filtered_result)
     }
@@ -1267,8 +1326,32 @@ impl AnalyticsDag {
         let node = self
             .get_node(node_id)
             .ok_or_else(|| DagError::NodeNotFound(format!("Node {} not found", node_id.0)))?;
+        
+        debug!(
+            node_id = node_id.0,
+            node_type = %node.node_type,
+            timestamp = %timestamp,
+            input_value = value,
+            parent_count = parent_outputs.len(),
+            "Executing push node"
+        );
+        
+        trace!(
+            node_id = node_id.0,
+            parents = ?parent_outputs.iter().map(|p| (p.analytic, p.output.len())).collect::<Vec<_>>(),
+            "Parent outputs for push node"
+        );
+        
         let executor = self.executor_for_node(node, node_id)?;
-        executor.execute_push(node, parent_outputs, timestamp, value)
+        let result = executor.execute_push(node, parent_outputs, timestamp, value)?;
+        
+        trace!(
+            node_id = node_id.0,
+            result = ?result,
+            "Push node execution result"
+        );
+        
+        Ok(result)
     }
 }
 

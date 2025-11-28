@@ -11,6 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use tracing::{debug, trace};
 
 fn parse_lag_from_map(params: &HashMap<String, String>) -> usize {
     params
@@ -257,11 +258,35 @@ impl AnalyticExecutor for MergeExecutor {
         &self,
         node: &Node,
         parent_outputs: &[ParentOutput],
-        _timestamp: DateTime<Utc>,
+        timestamp: DateTime<Utc>,
         _value: f64,
     ) -> Result<NodeOutput, DagError> {
+        trace!(
+            node_id = node.id.0,
+            node_type = %node.node_type,
+            timestamp = %timestamp,
+            parent_count = parent_outputs.len(),
+            sources = ?self.sources,
+            "MergeExecutor: executing push"
+        );
+        
         let slices = self.gather(parent_outputs);
-        self.scalar_for_slices(node, &slices)
+        
+        trace!(
+            node_id = node.id.0,
+            slice_lengths = ?slices.iter().map(|s| s.len()).collect::<Vec<_>>(),
+            "MergeExecutor: gathered parent slices"
+        );
+        
+        let result = self.scalar_for_slices(node, &slices)?;
+        
+        trace!(
+            node_id = node.id.0,
+            result = ?result,
+            "MergeExecutor: computed result"
+        );
+        
+        Ok(result)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -426,17 +451,41 @@ impl AnalyticExecutor for DataProviderExecutor {
         let asset = node.assets.first().ok_or_else(|| {
             DagError::ExecutionError("DataProvider node has no assets".to_string())
         })?;
+        
+        debug!(
+            node_id = node.id.0,
+            asset = %asset,
+            start_date = %date_range.start,
+            end_date = %date_range.end,
+            "DataProviderExecutor: querying time series"
+        );
+        
         let data = provider.get_time_series(asset, date_range)?;
+        
+        debug!(
+            node_id = node.id.0,
+            asset = %asset,
+            data_point_count = data.len(),
+            "DataProviderExecutor: retrieved time series"
+        );
+        
         Ok(data)
     }
 
     fn execute_push(
         &self,
-        _node: &Node,
+        node: &Node,
         _parent_outputs: &[ParentOutput],
         timestamp: DateTime<Utc>,
         value: f64,
     ) -> Result<NodeOutput, DagError> {
+        trace!(
+            node_id = node.id.0,
+            timestamp = %timestamp,
+            value = value,
+            "DataProviderExecutor: executing push"
+        );
+        
         Ok(NodeOutput::Single(vec![TimeSeriesPoint::new(
             timestamp, value,
         )]))
@@ -545,9 +594,17 @@ impl AnalyticExecutor for WindowedAnalyticExecutor {
         &self,
         node: &Node,
         parent_outputs: &[ParentOutput],
-        _timestamp: DateTime<Utc>,
+        timestamp: DateTime<Utc>,
         _value: f64,
     ) -> Result<NodeOutput, DagError> {
+        trace!(
+            node_id = node.id.0,
+            node_type = %node.node_type,
+            timestamp = %timestamp,
+            source = ?self.source,
+            "WindowedAnalyticExecutor: executing push"
+        );
+        
         let points = parent_outputs
             .iter()
             .find(|parent| parent.analytic == self.source)
@@ -559,7 +616,20 @@ impl AnalyticExecutor for WindowedAnalyticExecutor {
                 ))
             })?;
 
+        trace!(
+            node_id = node.id.0,
+            input_points = points.len(),
+            "WindowedAnalyticExecutor: processing input points"
+        );
+
         let value = self.scalar_for_points(node, points)?;
+        
+        trace!(
+            node_id = node.id.0,
+            computed_value = value,
+            "WindowedAnalyticExecutor: computed result"
+        );
+        
         Ok(NodeOutput::Scalar(value))
     }
 

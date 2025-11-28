@@ -10,6 +10,7 @@ pub use state::{AnalyticConfig, AppState, SessionStatus};
 
 use crate::sqlite_provider::SqliteDataProvider;
 use std::sync::Arc;
+use tracing_subscriber::prelude::*;
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -63,11 +64,19 @@ impl ServerConfig {
 /// }
 /// ```
 pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
+    // Initialize tracing with environment filter
+    // Set RUST_LOG environment variable to control log level:
+    //   RUST_LOG=debug - debug level and above
+    //   RUST_LOG=trace - trace level (most verbose)
+    //   RUST_LOG=analytics::dag=trace - trace for DAG module only
+    let filter = tracing_subscriber::EnvFilter::from_default_env();
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
-        .compact()
-        .init();
+        .compact();
+    let subscriber = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer);
+    tracing::subscriber::set_global_default(subscriber)?;
 
     // Create data provider
     let data_provider = SqliteDataProvider::new(&config.database_path)?;

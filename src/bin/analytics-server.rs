@@ -6,6 +6,11 @@ use analytics::{run_server, ServerConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Note: Tracing is initialized in run_server()
+    // Set RUST_LOG environment variable to control log level:
+    //   RUST_LOG=debug cargo run --bin analytics-server
+    //   RUST_LOG=analytics::dag=debug cargo run --bin analytics-server  (DAG only)
+
     // Create default configuration
     // In production, this would load from config file or environment variables
     let config = ServerConfig::default();
