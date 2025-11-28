@@ -28,6 +28,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Static information endpoints
         .route("/assets", get(handlers::list_assets))
         .route("/dag/nodes", get(handlers::list_analytics))
+        .route("/dag/visualize", get(handlers::visualize_dag))
         // Asset data query
         .route("/assets/:asset/data", get(handlers::get_asset_data))
         // Pull-mode analytics

@@ -66,3 +66,40 @@ export interface ProgressUpdate {
   progress: number;
 }
 
+// DAG Visualization Types
+export interface NodePosition {
+  x: number;
+  y: number;
+}
+
+export interface VisualizationNode {
+  id: number;
+  node_type: string;
+  analytic_type: string;
+  assets: string[];
+  params: Record<string, string>;
+  position?: NodePosition;
+  data_url?: string;
+  code_url?: string;
+  description?: string;
+}
+
+export interface VisualizationEdge {
+  source: number;
+  target: number;
+  label?: string;
+}
+
+export interface DagMetadata {
+  node_count: number;
+  edge_count: number;
+  api_base_url: string;
+  code_base_url: string;
+}
+
+export interface DagVisualization {
+  nodes: VisualizationNode[];
+  edges: VisualizationEdge[];
+  metadata: DagMetadata;
+}
+

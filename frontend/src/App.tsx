@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
-import { Container, Typography, Box } from '@mui/material';
+import { Container, Typography, Box, Tabs, Tab } from '@mui/material';
 import { AssetSelector } from './components/AssetSelector';
 import { AnalyticsPresets, PRESETS } from './components/AnalyticsPresets';
 import { ApiUrlDisplay } from './components/ApiUrlDisplay';
 import { Chart } from './components/Chart';
 import { ReplayControls } from './components/ReplayControls';
-import { getAssets, getAnalytics, createReplaySession, stopReplaySession, buildApiUrl } from './services/api';
+import { DagVisualization } from './components/DagVisualization';
+import { getAssets, getAnalytics, createReplaySession, stopReplaySession, buildApiUrl, getDagVisualization } from './services/api';
 import { connectToStream, closeStream } from './services/sse';
-import type { Preset, ChartData, AnalyticUpdate, ProgressUpdate } from './types';
+import type { Preset, ChartData, AnalyticUpdate, ProgressUpdate, DagVisualization as DagVisualizationType } from './types';
 
 function App() {
   // Assets state
@@ -33,6 +34,14 @@ function App() {
   // SSE state
   const [eventSource, setEventSource] = useState<EventSource | null>(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState(0);
+
+  // DAG Visualization state
+  const [dagData, setDagData] = useState<DagVisualizationType | null>(null);
+  const [dagLoading, setDagLoading] = useState(false);
+  const [dagError, setDagError] = useState<string | null>(null);
+
   // Load assets on mount
   useEffect(() => {
     async function loadAssets() {
@@ -52,6 +61,7 @@ function App() {
   useEffect(() => {
     if (selectedAssets.length > 0 && selectedPreset && replayStatus === 'idle') {
       fetchAnalytics();
+      fetchDagVisualization();
     }
   }, [selectedAssets, selectedPreset]);
 
@@ -102,6 +112,34 @@ function App() {
     } catch (error) {
       setChartError(error instanceof Error ? error.message : 'Failed to fetch analytics');
       setChartLoading(false);
+    }
+  };
+
+  const fetchDagVisualization = async () => {
+    if (selectedAssets.length === 0 || !selectedPreset) {
+      setDagData(null);
+      return;
+    }
+
+    setDagLoading(true);
+    setDagError(null);
+
+    try {
+      // Use the first selected asset for DAG visualization
+      const dag = await getDagVisualization(
+        selectedAssets[0],
+        selectedPreset.analyticType,
+        {
+          start: '2024-01-01',
+          end: '2024-12-31',
+          window: selectedPreset.params?.window,
+        }
+      );
+      setDagData(dag);
+      setDagLoading(false);
+    } catch (error) {
+      setDagError(error instanceof Error ? error.message : 'Failed to fetch DAG visualization');
+      setDagLoading(false);
     }
   };
 
@@ -236,21 +274,40 @@ function App() {
 
         <ApiUrlDisplay url={apiUrl} />
 
-        <Chart
-          data={chartData}
-          assets={selectedAssets}
-          analyticType={selectedPreset?.label || ''}
-          loading={chartLoading}
-          error={chartError}
-        />
+        <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+          <Tabs value={activeTab} onChange={(_, newValue) => setActiveTab(newValue)}>
+            <Tab label="Analytics" />
+            <Tab label="DAG Visualization" />
+          </Tabs>
+        </Box>
 
-        <ReplayControls
-          onStartReplay={handleStartReplay}
-          onStopReplay={handleStopReplay}
-          status={replayStatus}
-          progress={replayProgress}
-          error={replayError}
-        />
+        {activeTab === 0 && (
+          <Box>
+            <Chart
+              data={chartData}
+              assets={selectedAssets}
+              analyticType={selectedPreset?.label || ''}
+              loading={chartLoading}
+              error={chartError}
+            />
+
+            <ReplayControls
+              onStartReplay={handleStartReplay}
+              onStopReplay={handleStopReplay}
+              status={replayStatus}
+              progress={replayProgress}
+              error={replayError}
+            />
+          </Box>
+        )}
+
+        {activeTab === 1 && (
+          <DagVisualization
+            dag={dagData}
+            loading={dagLoading}
+            error={dagError}
+          />
+        )}
       </Box>
     </Container>
   );

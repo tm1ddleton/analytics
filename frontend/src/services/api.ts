@@ -4,6 +4,7 @@ import type {
   AnalyticsResponse,
   AnalyticConfig,
   SessionResponse,
+  DagVisualization,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
@@ -76,6 +77,37 @@ export async function stopReplaySession(sessionId: string): Promise<void> {
   } catch (error) {
     console.error('Failed to stop replay session:', error);
     throw new Error('Failed to stop replay session');
+  }
+}
+
+export async function getDagVisualization(
+  asset: string,
+  analyticType: string,
+  params: { start: string; end: string; window?: number; override?: string }
+): Promise<DagVisualization> {
+  try {
+    const queryParams = new URLSearchParams({
+      asset,
+      analytic: analyticType,
+      start: params.start,
+      end: params.end,
+    });
+    
+    if (params.window !== undefined) {
+      queryParams.append('window', params.window.toString());
+    }
+    
+    if (params.override) {
+      queryParams.append('override', params.override);
+    }
+
+    const response = await apiClient.get<DagVisualization>(
+      `/dag/visualize?${queryParams.toString()}`
+    );
+    return response.data;
+  } catch (error) {
+    console.error('Failed to fetch DAG visualization:', error);
+    throw new Error('Failed to fetch DAG visualization');
   }
 }
 

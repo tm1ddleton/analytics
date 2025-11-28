@@ -134,6 +134,64 @@ pub async fn list_analytics() -> Json<AnalyticsListResponse> {
     Json(AnalyticsListResponse { analytics })
 }
 
+/// Query parameters for DAG visualization
+#[derive(Debug, Deserialize)]
+pub struct DagVisualizationQueryParams {
+    pub asset: String,
+    pub analytic: String,
+    pub start: String,
+    pub end: String,
+    pub window: Option<usize>,
+    #[serde(rename = "override")]
+    pub override_tag: Option<String>,
+}
+
+/// GET /dag/visualize?asset={asset}&analytic={type}&start={date}&end={date}
+/// Returns the DAG structure for visualization
+pub async fn visualize_dag(
+    Query(params): Query<DagVisualizationQueryParams>,
+) -> Result<Json<crate::dag::DagVisualization>, ApiError> {
+    use crate::asset_key::AssetKey;
+    use chrono::NaiveDate;
+
+    // Parse asset
+    let asset_key = AssetKey::new_equity(&params.asset)
+        .map_err(|_| ApiError::InvalidParameter(format!("Invalid asset: {}", params.asset)))?;
+
+    // Parse dates
+    let start_date = NaiveDate::parse_from_str(&params.start, "%Y-%m-%d")
+        .map_err(|_| ApiError::InvalidParameter("Invalid start date format".to_string()))?;
+    let end_date = NaiveDate::parse_from_str(&params.end, "%Y-%m-%d")
+        .map_err(|_| ApiError::InvalidParameter("Invalid end date format".to_string()))?;
+    let date_range = DateRange::new(start_date, end_date);
+
+    // Build params map
+    let mut params_map = HashMap::new();
+    if let Some(window) = params.window {
+        params_map.insert("window".to_string(), window.to_string());
+    }
+
+    // Build the DAG
+    let (dag, _, _) = build_analytics_dag(
+        &asset_key,
+        &params.analytic,
+        &date_range,
+        &params_map,
+        params.override_tag.clone(),
+    )?;
+
+    // Get base URLs from environment or use defaults
+    let api_base_url = std::env::var("API_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let code_base_url = std::env::var("CODE_BASE_URL")
+        .unwrap_or_else(|_| "https://github.com/tm1ddleton/analytics".to_string());
+
+    // Generate visualization
+    let visualization = dag.to_visualization(&api_base_url, &code_base_url);
+
+    Ok(Json(visualization))
+}
+
 // Task Group 4: Asset Data Query
 
 /// Query parameters for asset data endpoint
