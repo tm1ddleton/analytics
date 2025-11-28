@@ -50,6 +50,35 @@ fn params_with_range(analytic_type: &str, range: &DateRange) -> HashMap<String, 
     params
 }
 
+fn build_lag_series(prices: &[TimeSeriesPoint], lag: usize) -> Vec<TimeSeriesPoint> {
+    if prices.is_empty() {
+        return Vec::new();
+    }
+
+    let analytic = FixedLag::new(lag);
+    let required = analytic.required_points();
+    let mut window = VecDeque::new();
+    let mut result = Vec::with_capacity(prices.len());
+
+    for point in prices {
+        window.push_front(point.close_price);
+        if window.len() > required {
+            window.pop_back();
+        }
+
+        let value = if window.len() == required {
+            let values: Vec<f64> = window.iter().copied().collect();
+            analytic.compute_lagged(&values).unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        };
+
+        result.push(TimeSeriesPoint::new(point.timestamp, value));
+    }
+
+    result
+}
+
 /// Executor invoked for a node to perform pull or push calculations.
 pub struct ParentOutput {
     pub node_id: NodeId,
@@ -164,14 +193,164 @@ impl AnalyticDefinition for DataProviderDefinition {
     }
 }
 
+struct MergeExecutor {
+    sources: Vec<AnalyticType>,
+    pull_fn: Arc<
+        dyn Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<Vec<TimeSeriesPoint>, DagError>
+            + Send
+            + Sync,
+    >,
+    push_fn: Arc<
+        dyn Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<NodeOutput, DagError> + Send + Sync,
+    >,
+}
+
+impl MergeExecutor {
+    fn new(
+        sources: Vec<AnalyticType>,
+        pull_fn: impl Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<Vec<TimeSeriesPoint>, DagError>
+            + Send
+            + Sync
+            + 'static,
+        push_fn: impl Fn(&Node, &[Option<&[TimeSeriesPoint]>]) -> Result<NodeOutput, DagError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        MergeExecutor {
+            sources,
+            pull_fn: Arc::new(pull_fn),
+            push_fn: Arc::new(push_fn),
+        }
+    }
+
+    fn gather<'a>(&self, parent_outputs: &'a [ParentOutput]) -> Vec<Option<&'a [TimeSeriesPoint]>> {
+        let mut slices = Vec::with_capacity(self.sources.len());
+        for analytic in &self.sources {
+            let slice = parent_outputs
+                .iter()
+                .find(|parent| parent.analytic == *analytic)
+                .map(|parent| parent.output.as_slice());
+            slices.push(slice);
+        }
+        slices
+    }
+}
+
+impl AnalyticExecutor for MergeExecutor {
+    fn execute_pull(
+        &self,
+        node: &Node,
+        parent_outputs: &[ParentOutput],
+        _date_range: &DateRange,
+        _provider: &dyn DataProvider,
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        let slices = self.gather(parent_outputs);
+        (self.pull_fn)(node, &slices)
+    }
+
+    fn execute_push(
+        &self,
+        node: &Node,
+        parent_outputs: &[ParentOutput],
+        _timestamp: DateTime<Utc>,
+        _value: f64,
+    ) -> Result<NodeOutput, DagError> {
+        let slices = self.gather(parent_outputs);
+        (self.push_fn)(node, &slices)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 struct ReturnsDefinition {
     executor: Box<dyn AnalyticExecutor>,
 }
 
 impl ReturnsDefinition {
     fn new() -> Self {
+        let primitive = Arc::new(LogReturnAnalytic);
+        let merge_executor = MergeExecutor::new(
+            vec![AnalyticType::DataProvider, AnalyticType::Lag],
+            {
+                let primitive = primitive.clone();
+                #[allow(unused_assignments)]
+                move |node, slices| {
+                    let prices = slices[0].ok_or_else(|| {
+                        DagError::ExecutionError("Returns node requires price input".to_string())
+                    })?;
+                    let mut fallback_lag: Option<Vec<TimeSeriesPoint>> = None;
+                    let lag_slice = if let Some(lagged) = slices[1] {
+                        lagged
+                    } else {
+                        let lag = parse_lag_from_params(&node.params);
+                        fallback_lag = Some(build_lag_series(prices, lag));
+                        fallback_lag.as_ref().unwrap().as_slice()
+                    };
+                    let _ = &fallback_lag;
+                    if lag_slice.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let asset = node.assets.first().ok_or_else(|| {
+                        DagError::ExecutionError("Returns node missing asset".to_string())
+                    })?;
+                    let length = std::cmp::min(prices.len(), lag_slice.len());
+                    let mut result = Vec::with_capacity(length);
+                    for (price, lag_point) in prices.iter().zip(lag_slice.iter()).take(length) {
+                        let value = if price.close_price.is_nan() || lag_point.close_price.is_nan()
+                        {
+                            f64::NAN
+                        } else {
+                            primitive.compute(Some(asset), price.close_price, lag_point.close_price)
+                        };
+                        result.push(TimeSeriesPoint::new(price.timestamp, value));
+                    }
+                    Ok(result)
+                }
+            },
+            {
+                let primitive = primitive.clone();
+                #[allow(unused_assignments)]
+                move |node, slices| {
+                    let prices = slices[0].ok_or_else(|| {
+                        DagError::ExecutionError("Returns update requires price input".to_string())
+                    })?;
+                    let mut fallback_lag: Option<Vec<TimeSeriesPoint>> = None;
+                    let lag_slice = if let Some(lagged) = slices[1] {
+                        lagged
+                    } else {
+                        let lag = parse_lag_from_params(&node.params);
+                        fallback_lag = Some(build_lag_series(prices, lag));
+                        fallback_lag.as_ref().unwrap().as_slice()
+                    };
+                    let _ = &fallback_lag;
+                    if lag_slice.is_empty() {
+                        return Err(DagError::ExecutionError(
+                            "Returns update requires input price and lagged values".to_string(),
+                        ));
+                    }
+                    let asset = node.assets.first().ok_or_else(|| {
+                        DagError::ExecutionError("Returns node missing asset".to_string())
+                    })?;
+                    let price_point = prices.last().unwrap();
+                    let lag_point = lag_slice.last().unwrap();
+                    if price_point.close_price.is_nan() || lag_point.close_price.is_nan() {
+                        Ok(NodeOutput::Scalar(f64::NAN))
+                    } else {
+                        Ok(NodeOutput::Scalar(primitive.compute(
+                            Some(asset),
+                            price_point.close_price,
+                            lag_point.close_price,
+                        )))
+                    }
+                }
+            },
+        );
+
         ReturnsDefinition {
-            executor: Box::new(ReturnsExecutor::new(Box::new(LogReturnAnalytic))),
+            executor: Box::new(merge_executor),
         }
     }
 }
@@ -374,180 +553,6 @@ impl AnalyticDefinition for LagDefinition {
 
     fn executor(&self) -> &dyn AnalyticExecutor {
         self.executor.as_ref()
-    }
-}
-
-struct ReturnsExecutor {
-    primitive: Box<dyn ReturnAnalytic>,
-}
-
-impl ReturnsExecutor {
-    fn new(primitive: Box<dyn ReturnAnalytic>) -> Self {
-        ReturnsExecutor { primitive }
-    }
-
-    fn lag_from_node(node: &Node) -> usize {
-        if let NodeParams::Map(ref params) = node.params {
-            parse_lag_from_map(params)
-        } else {
-            1
-        }
-    }
-
-    fn build_lag_series(prices: &[TimeSeriesPoint], lag: usize) -> Vec<TimeSeriesPoint> {
-        if prices.is_empty() {
-            return Vec::new();
-        }
-
-        let analytic = FixedLag::new(lag);
-        let required = analytic.required_points();
-        let mut window = VecDeque::new();
-        let mut result = Vec::with_capacity(prices.len());
-
-        for point in prices {
-            window.push_front(point.close_price);
-            if window.len() > required {
-                window.pop_back();
-            }
-
-            let value = if window.len() == required {
-                let values: Vec<f64> = window.iter().copied().collect();
-                analytic.compute_lagged(&values).unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            };
-            result.push(TimeSeriesPoint::new(point.timestamp, value));
-        }
-
-        result
-    }
-
-    fn build_series(
-        &self,
-        asset: &AssetKey,
-        prices: &[TimeSeriesPoint],
-        lagged: &[TimeSeriesPoint],
-    ) -> Vec<TimeSeriesPoint> {
-        if prices.is_empty() || lagged.is_empty() {
-            return Vec::new();
-        }
-
-        let length = std::cmp::min(prices.len(), lagged.len());
-        let mut result = Vec::with_capacity(length);
-
-        for (price, lag_point) in prices.iter().zip(lagged.iter()).take(length) {
-            let value = if price.close_price.is_nan() || lag_point.close_price.is_nan() {
-                f64::NAN
-            } else {
-                self.primitive
-                    .compute(Some(asset), price.close_price, lag_point.close_price)
-            };
-            result.push(TimeSeriesPoint::new(price.timestamp, value));
-        }
-
-        result
-    }
-
-    fn build_update(
-        &self,
-        asset: &AssetKey,
-        prices: &[TimeSeriesPoint],
-        lagged: &[TimeSeriesPoint],
-    ) -> Result<f64, DagError> {
-        if prices.is_empty() || lagged.is_empty() {
-            return Err(DagError::ExecutionError(
-                "Returns update requires input price and lagged values".to_string(),
-            ));
-        }
-
-        let price_point = prices.last().unwrap();
-        let lag_point = lagged.last().unwrap();
-        if price_point.close_price.is_nan() || lag_point.close_price.is_nan() {
-            Ok(f64::NAN)
-        } else {
-            Ok(self
-                .primitive
-                .compute(Some(asset), price_point.close_price, lag_point.close_price))
-        }
-    }
-}
-
-impl AnalyticExecutor for ReturnsExecutor {
-    fn execute_pull(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _date_range: &DateRange,
-        _provider: &dyn DataProvider,
-    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        let price_data = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::DataProvider)
-            .map(|parent| parent.output.as_slice())
-            .ok_or_else(|| {
-                DagError::ExecutionError("Returns node requires price input".to_string())
-            })?;
-
-        let mut _fallback_lag = Vec::new();
-        let lag_data_slice = if let Some(lag_parent) = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::Lag)
-        {
-            lag_parent.output.as_slice()
-        } else {
-            _fallback_lag = Self::build_lag_series(price_data, Self::lag_from_node(node));
-            _fallback_lag.as_slice()
-        };
-
-        if price_data.is_empty() || lag_data_slice.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let asset = node
-            .assets
-            .first()
-            .ok_or_else(|| DagError::ExecutionError("Returns node missing asset".to_string()))?;
-
-        Ok(self.build_series(asset, price_data, lag_data_slice))
-    }
-
-    fn execute_push(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _timestamp: DateTime<Utc>,
-        _value: f64,
-    ) -> Result<NodeOutput, DagError> {
-        let price_data = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::DataProvider)
-            .map(|parent| parent.output.as_slice())
-            .ok_or_else(|| {
-                DagError::ExecutionError("Returns update requires price data".to_string())
-            })?;
-
-        let mut _fallback_lag = Vec::new();
-        let lag_data_slice = if let Some(lag_parent) = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == AnalyticType::Lag)
-        {
-            lag_parent.output.as_slice()
-        } else {
-            _fallback_lag = Self::build_lag_series(price_data, Self::lag_from_node(node));
-            _fallback_lag.as_slice()
-        };
-
-        let asset = node
-            .assets
-            .first()
-            .ok_or_else(|| DagError::ExecutionError("Returns node missing asset".to_string()))?;
-
-        let value = self.build_update(asset, price_data, lag_data_slice)?;
-        Ok(NodeOutput::Scalar(value))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 
