@@ -1101,51 +1101,25 @@ impl AnalyticsDag {
             }
         }
 
-        // Create execution cache for intermediate results
-        let mut cache = ExecutionCache::new();
-        let mut calendar_cache: HashMap<AssetKey, Vec<DateTime<Utc>>> = HashMap::new();
-
-        // Execute nodes in topological order with extended date range
-        for &current_id in &nodes_to_execute {
-            // Get parent outputs from cache
-            let parents = self.get_parents(current_id);
-            let parent_outputs: Vec<ParentOutput> = parents
-                .iter()
-                .map(|&parent_id| ParentOutput {
-                    node_id: parent_id,
-                    analytic: self.analytic_type_for_node(parent_id),
-                    output: cache.get(parent_id).cloned().unwrap_or_default(),
-                })
-                .collect();
-
-            // Execute the node based on its type (using extended range for data loading)
-            let result = self.execute_pull_node(
-                current_id,
-                &parent_outputs,
-                &extended_range,
-                provider,
-                &mut calendar_cache,
-            )?;
-
-            // Cache the result with its extended range
-            cache.insert(current_id, result, extended_range.clone());
-        }
-
-        // Identify a data provider node to drive the simulated push
+        // Identify a data provider node to drive the push-mode iteration
         let data_node_id = nodes_to_execute
             .iter()
             .find(|&&id| self.is_data_provider_node(id))
             .ok_or_else(|| {
                 DagError::ExecutionError(
-                    "No data provider node found for push simulation".to_string(),
+                    "No data provider node found for pull-mode execution".to_string(),
                 )
             })?;
 
-        let data_points = cache.get(*data_node_id).cloned().ok_or_else(|| {
-            DagError::ExecutionError("Data provider output missing for simulation".to_string())
-        })?;
+        // Query the whole time series from the data provider upfront
+        let data_node = self
+            .get_node(*data_node_id)
+            .ok_or_else(|| DagError::NodeNotFound(format!("Data node {} not found", data_node_id.0)))?;
+        let executor = self.executor_for_node(data_node, *data_node_id)?;
+        let parent_outputs: Vec<ParentOutput> = Vec::new(); // Data provider has no parents
+        let data_points = executor.execute_pull(data_node, &parent_outputs, &extended_range, provider)?;
 
-        // Simulate push-mode over the cached calendar/timestamps
+        // Now iterate point by point like push mode, collecting results
         let simulated =
             self.simulate_push_from_calendar(&nodes_to_execute, &data_points, node_id)?;
 

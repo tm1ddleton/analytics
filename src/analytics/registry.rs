@@ -87,13 +87,22 @@ pub struct ParentOutput {
 }
 
 pub trait AnalyticExecutor: Send + Sync {
+    /// Execute in pull mode (batch computation of entire time series).
+    /// 
+    /// Default implementation returns an error - only DataProviderExecutor should override this.
+    /// All other executors work in push mode (point-by-point) which is used for both
+    /// push-mode and pull-mode (pull-mode simulates push-mode by iterating over data).
     fn execute_pull(
         &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        date_range: &DateRange,
-        provider: &dyn DataProvider,
-    ) -> Result<Vec<TimeSeriesPoint>, DagError>;
+        _node: &Node,
+        _parent_outputs: &[ParentOutput],
+        _date_range: &DateRange,
+        _provider: &dyn DataProvider,
+    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
+        Err(DagError::ExecutionError(
+            "This executor does not support pull mode. Use push mode instead.".to_string(),
+        ))
+    }
 
     fn execute_push(
         &self,
@@ -223,40 +232,6 @@ impl MergeExecutor {
         slices
     }
 
-    fn series_for_slices(
-        &self,
-        node: &Node,
-        slices: &[&[TimeSeriesPoint]],
-    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        if slices.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Find the maximum length to process all inputs (some might be shorter)
-        let max_len = slices.iter().map(|s| s.len()).max().unwrap_or(0);
-        if max_len == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut result = Vec::with_capacity(max_len);
-        for i in 0..max_len {
-            // Align points at index i from each slice
-            let aligned_points: Vec<Option<&TimeSeriesPoint>> =
-                slices.iter().map(|s| s.get(i)).collect();
-
-            // Get timestamp from first available point
-            let timestamp = aligned_points
-                .iter()
-                .find_map(|p| p.map(|pt| pt.timestamp))
-                .unwrap_or_else(|| Utc::now());
-
-            let value = (self.compute_fn)(node, &aligned_points);
-            result.push(TimeSeriesPoint::new(timestamp, value));
-        }
-
-        Ok(result)
-    }
-
     fn scalar_for_slices(
         &self,
         node: &Node,
@@ -278,17 +253,6 @@ impl MergeExecutor {
 }
 
 impl AnalyticExecutor for MergeExecutor {
-    fn execute_pull(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _date_range: &DateRange,
-        _provider: &dyn DataProvider,
-    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        let slices = self.gather(parent_outputs);
-        self.series_for_slices(node, &slices)
-    }
-
     fn execute_push(
         &self,
         node: &Node,
@@ -560,22 +524,6 @@ impl WindowedAnalyticExecutor {
         points.iter().map(|p| p.close_price).collect()
     }
 
-    fn series_for_points(&self, node: &Node, points: &[TimeSeriesPoint]) -> Vec<TimeSeriesPoint> {
-        let window_size = (self.window_size_fn)(node);
-        let values = Self::extract_values(points);
-        let asset = node.assets.first().map(|asset| asset);
-        let mut result = Vec::with_capacity(points.len());
-
-        for (idx, point) in points.iter().enumerate() {
-            let start = idx.saturating_sub(window_size.saturating_sub(1));
-            let window = &values[start..=idx];
-            let value = (self.compute_fn)(asset, window, window_size);
-            result.push(TimeSeriesPoint::new(point.timestamp, value));
-        }
-
-        result
-    }
-
     fn scalar_for_points(&self, node: &Node, points: &[TimeSeriesPoint]) -> Result<f64, DagError> {
         if points.is_empty() {
             return Err(DagError::ExecutionError(
@@ -593,31 +541,6 @@ impl WindowedAnalyticExecutor {
 }
 
 impl AnalyticExecutor for WindowedAnalyticExecutor {
-    fn execute_pull(
-        &self,
-        node: &Node,
-        parent_outputs: &[ParentOutput],
-        _date_range: &DateRange,
-        _provider: &dyn DataProvider,
-    ) -> Result<Vec<TimeSeriesPoint>, DagError> {
-        let points = parent_outputs
-            .iter()
-            .find(|parent| parent.analytic == self.source)
-            .map(|parent| parent.output.as_slice())
-            .ok_or_else(|| {
-                DagError::ExecutionError(format!(
-                    "Windowed analytic requires {} input data",
-                    self.source
-                ))
-            })?;
-
-        if points.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(self.series_for_points(node, points))
-    }
-
     fn execute_push(
         &self,
         node: &Node,
