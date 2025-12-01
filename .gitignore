@@ -51,3 +51,9 @@ coverage/
 # Logs
 *.log
 
+# Docker data directory (contains database files)
+/data/
+# But allow analytics.db in root if user wants to commit it for POC
+# Uncomment the line below if you want to ignore analytics.db too:
+# analytics.db
+

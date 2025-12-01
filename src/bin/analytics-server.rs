@@ -11,9 +11,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   RUST_LOG=debug cargo run --bin analytics-server
     //   RUST_LOG=analytics::dag=debug cargo run --bin analytics-server  (DAG only)
 
-    // Create default configuration
-    // In production, this would load from config file or environment variables
-    let config = ServerConfig::default();
+    // Create configuration from environment variables or defaults
+    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("PORT")
+        .unwrap_or_else(|_| "3000".to_string())
+        .parse::<u16>()
+        .unwrap_or(3000);
+    let database_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "analytics.db".to_string());
+    
+    let config = ServerConfig::new(host, port, database_path);
 
     println!("🚀 Starting Analytics API Server...");
     println!("   Host: {}", config.host);
