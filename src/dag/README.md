@@ -157,15 +157,24 @@ This means you only need to resolve the final node - all dependencies are create
 **Pull-Mode (Batch Execution):**
 - Executes complete time series for a date range
 - Extends date range backward for burn-in automatically
-- Uses topological sort to execute dependencies first
-- Caches intermediate results to avoid recomputation
+- **Uses push-mode simulation**: Only `DataProviderExecutor` uses `execute_pull()` to get the full time series upfront
+- All other nodes use `execute_push()` point-by-point through the data
+- Iterates through data points sequentially, simulating incremental push-mode execution
+- Filters results to the originally requested date range
 - Supports parallel execution for independent branches
 
 **Push-Mode (Incremental Execution):**
 - Executes one data point at a time
 - Maintains state across incremental updates
-- Simulates push-mode from calendar data for pull-mode queries
-- Used internally by pull-mode for nodes that require incremental state
+- All executors implement `execute_push()` for point-by-point computation
+- Used directly for real-time streaming updates
+- Also used internally by pull-mode via `simulate_push_from_calendar()`
+
+**Note:** Pull-mode doesn't have separate batch logic for most nodes. Instead, it:
+1. Queries `DataProvider` to get the full time series (only node with `execute_pull()` implementation)
+2. Calls `simulate_push_from_calendar()` which iterates through data points
+3. For each point, calls `execute_push()` on all nodes in topological order
+4. Collects results and filters to the requested date range
 
 ### Burn-in Calculation
 
@@ -206,8 +215,13 @@ The DAG automatically:
 │            DAG Structure                                │
 │                                                          │
 │  DataProvider ──┐                                       │
-│                 ├──> Lag ──> Returns ──> Volatility      │
-│  DataProvider ──┘                                       │
+│                 ├──> Returns ──> Volatility              │
+│                 │                                       │
+│                 └──> Lag ──┘                            │
+│                                                          │
+│  Returns has two parents:                               │
+│  - DataProvider (current price)                          │
+│  - Lag (lagged price, which also depends on DataProvider)│
 │                                                          │
 │  Nodes deduplicated by NodeKey                          │
 │  Edges represent data dependencies                      │
@@ -220,12 +234,16 @@ The DAG automatically:
 │                                                          │
 │  1. Calculate burn-in days                              │
 │  2. Extend date range backward                          │
-│  3. Topological sort → execution order                   │
-│  4. For each node in order:                             │
-│     - Get parent outputs from cache                     │
-│     - Execute node's executor                           │
-│     - Cache result for children                         │
-│  5. Return filtered results for target range             │
+│  3. Query DataProvider.execute_pull() for full series    │
+│  4. simulate_push_from_calendar():                      │
+│     For each data point:                                │
+│       - Topological sort → execution order               │
+│       - For each node: execute_push() point-by-point    │
+│       - Collect outputs in push_history                 │
+│  5. Filter results to originally requested date range   │
+│                                                          │
+│  Note: Pull-mode uses push-mode simulation - only       │
+│  DataProvider has separate pull logic                   │
 │                                                          │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -246,7 +264,10 @@ let volatility_key = NodeKey {
 };
 
 let volatility_node = dag.resolve_node(volatility_key)?;
-// DAG now contains: DataProvider -> Returns -> Volatility
+// DAG now contains:
+//   DataProvider ──┐
+//                  ├──> Returns ──> Volatility
+//                  └──> Lag ──┘
 ```
 
 **2. Execute in pull-mode:**
