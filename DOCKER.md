@@ -18,29 +18,35 @@ docker-compose up -d
 
 If you see `ModuleNotFoundError: No module named 'distutils'`, you're using the old version. Switch to `docker compose` (space).
 
-## Architecture Decision: Separate Containers
+## Simplified Architecture
 
-The platform uses **separate containers** for backend and frontend:
+The platform uses **separate containers** for backend and frontend with a simplified setup:
 
-### ✅ Why Separate Containers?
+- **Backend**: Rust API server (port 3000)
+- **Frontend**: Static files served by simple HTTP server (port 3001, exposed as 5173)
+- **No nginx**: Simplified setup for easier corporate network deployment
+- **Robust proxy support**: Handles corporate proxy configurations for apt-get and cargo builds
 
-1. **Different Update Cycles**: Frontend changes more frequently than backend
-2. **Independent Scaling**: Scale frontend and backend independently
-3. **Better Separation**: Clear boundaries between services
-4. **Technology Mismatch**: Rust backend vs Node.js frontend build
-5. **CDN Deployment**: Frontend can be deployed to CDN if needed
-6. **Easier Debugging**: Isolate issues to specific services
-7. **Resource Optimization**: Different resource requirements
+### Proxy Configuration (Corporate Networks)
 
-### ❌ Single Container Alternative
+If you're behind a corporate proxy, create a `.env` file in the project root:
 
-A single container is possible (backend serves static files), but:
-- Requires rebuilding entire container for frontend changes
-- Mixes concerns (API server + static file serving)
-- Less flexible for scaling
-- Harder to deploy frontend to CDN
+```bash
+# .env file
+HTTP_PROXY=http://username:password@proxy.example.com:8080
+HTTPS_PROXY=http://username:password@proxy.example.com:8080
+NO_PROXY=localhost,127.0.0.1
+```
 
-**Recommendation**: Use separate containers for production.
+**Important**: Escape special characters in passwords:
+- `"` becomes `\"` in JSON/strings
+- Example: `password!"£$` becomes `password!\"£$`
+
+The Dockerfiles automatically:
+- Configure apt-get to use the proxy
+- Configure cargo/rust to use the proxy
+- Configure npm to use the proxy
+- Include retry logic for network operations
 
 ## Quick Start
 
@@ -190,7 +196,7 @@ docker compose down
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:3000`
 
-The frontend automatically proxies API requests to the backend via nginx.
+The frontend connects directly to the backend API.
 
 ### Linux/macOS Users
 
@@ -217,7 +223,7 @@ docker compose down
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:3000`
 
-The frontend automatically proxies API requests to the backend via nginx.
+The frontend connects directly to the backend API.
 
 ## Windows Batch Files
 
@@ -326,7 +332,7 @@ docker run -d \
 
 ### Frontend Environment Variables
 
-- `VITE_API_URL` - Backend API URL (default: empty for relative URLs, uses nginx proxy)
+- `VITE_API_URL` - Backend API URL (default: `http://localhost:3000`)
 - `FRONTEND_PORT` - Port mapping for frontend (default: `5173`)
 
 ### Docker Compose Environment Variables
@@ -362,19 +368,16 @@ export RUST_LOG=info
 
 1. **Development**: Frontend uses `VITE_API_URL` or defaults to `http://localhost:3000`
 2. **Docker**: Frontend uses relative URLs (empty `VITE_API_URL`)
-3. **nginx Proxy**: Frontend nginx proxies API requests to backend service
+3. **Direct Connection**: Frontend connects directly to backend API
 4. **Docker Network**: Services communicate via Docker network (`analytics-network`)
 
 ### Request Flow in Docker
 
 ```
-Browser → Frontend (nginx:80) → Proxy → Backend (Rust:3000)
+Browser → Frontend (serve:3001) → Backend (Rust:3000)
 ```
 
-nginx configuration:
-- Proxies `/api/*` to `http://backend:3000/`
-- Proxies direct API paths (`/assets`, `/analytics`, etc.) to backend
-- Serves static React files for all other routes
+The frontend is a simple static file server that serves the React app. API calls go directly from the browser to the backend.
 
 ## Building
 
@@ -666,8 +669,8 @@ docker compose ps
 # Check network connectivity
 docker compose exec frontend wget -O- http://backend:3000/health
 
-# Verify nginx proxy configuration
-docker compose exec frontend cat /etc/nginx/conf.d/default.conf
+# Check frontend is serving files
+docker compose exec frontend ls -la /app/dist
 ```
 
 ### Database Issues

@@ -46,11 +46,6 @@ function getApiBaseUrl(): string {
 
 const API_BASE_URL = getApiBaseUrl();
 
-// Debug: Log the base URL being used
-if (typeof window !== 'undefined') {
-  console.log('API Base URL:', API_BASE_URL, 'Origin:', window.location.origin);
-}
-
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -58,25 +53,13 @@ const apiClient = axios.create({
   },
 });
 
-// Debug: Log the actual request URL being constructed
-apiClient.interceptors.request.use((config) => {
-  console.log('Axios Request Config:', {
-    baseURL: config.baseURL,
-    url: config.url,
-    fullURL: config.baseURL ? `${config.baseURL}${config.url}` : config.url,
-  });
-  return config;
-});
-
 export async function getAssets(): Promise<Asset[]> {
   try {
     // Construct full URL to avoid axios baseURL issues
-    // Remove leading slash from path since we're using full URL
     const url = API_BASE_URL.endsWith('/') 
       ? `${API_BASE_URL}assets` 
       : `${API_BASE_URL}/assets`;
     
-    console.log('Making request to full URL:', url);
     const response = await axios.get<{ assets: Asset[] }>(url, {
       headers: {
         'Content-Type': 'application/json',
@@ -85,10 +68,6 @@ export async function getAssets(): Promise<Asset[]> {
     return response.data.assets;
   } catch (error) {
     console.error('Failed to fetch assets:', error);
-    if (axios.isAxiosError(error)) {
-      console.error('Request URL:', error.config?.url);
-      console.error('Request baseURL:', error.config?.baseURL);
-    }
     throw new Error('Failed to fetch assets. Please check if the server is running.');
   }
 }

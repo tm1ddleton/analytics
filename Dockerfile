@@ -2,17 +2,51 @@
 # Stage 1: Build
 FROM rust:1.83-slim as builder
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Build arguments for proxy configuration
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+# Set proxy environment variables for apt-get and cargo
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV no_proxy=${NO_PROXY}
+ENV CARGO_HTTP_PROXY=${HTTP_PROXY}
+ENV CARGO_HTTPS_PROXY=${HTTPS_PROXY}
+
+# Configure apt-get to use proxy if provided
+RUN if [ -n "$HTTP_PROXY" ]; then \
+      echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" > /etc/apt/apt.conf.d/proxy.conf && \
+      echo "Acquire::https::Proxy \"${HTTPS_PROXY:-${HTTP_PROXY}}\";" >> /etc/apt/apt.conf.d/proxy.conf; \
+    fi
+
+# Install build dependencies with retries
+RUN for i in 1 2 3; do \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/* && break || sleep 10; \
+    done
 
 # Set working directory
 WORKDIR /app
 
 # Copy dependency files first for better caching
 COPY Cargo.toml Cargo.lock ./
+
+# Configure cargo to use proxy if provided (via config file)
+RUN if [ -n "$HTTP_PROXY" ]; then \
+      mkdir -p /root/.cargo && \
+      echo "[http]" > /root/.cargo/config.toml && \
+      echo "proxy = \"${HTTP_PROXY}\"" >> /root/.cargo/config.toml && \
+      echo "[https]" >> /root/.cargo/config.toml && \
+      echo "proxy = \"${HTTPS_PROXY:-${HTTP_PROXY}}\"" >> /root/.cargo/config.toml; \
+    fi
 
 # Create a dummy src directory to build dependencies
 RUN mkdir -p src/bin && \
@@ -23,17 +57,41 @@ RUN mkdir -p src/bin && \
 # Copy source code
 COPY src ./src
 
-# Build the actual application
-RUN cargo build --release --bin analytics-server
+# Build the actual application with retries
+RUN for i in 1 2 3; do \
+      cargo build --release --bin analytics-server && break || sleep 10; \
+    done
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
 
-# Install runtime dependencies (including wget for healthcheck)
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+# Build arguments for proxy configuration (needed for apt-get in runtime stage)
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+# Set proxy environment variables for apt-get
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+ENV http_proxy=${HTTP_PROXY}
+ENV https_proxy=${HTTPS_PROXY}
+ENV no_proxy=${NO_PROXY}
+
+# Configure apt-get to use proxy if provided
+RUN if [ -n "$HTTP_PROXY" ]; then \
+      echo "Acquire::http::Proxy \"${HTTP_PROXY}\";" > /etc/apt/apt.conf.d/proxy.conf && \
+      echo "Acquire::https::Proxy \"${HTTPS_PROXY:-${HTTP_PROXY}}\";" >> /etc/apt/apt.conf.d/proxy.conf; \
+    fi
+
+# Install runtime dependencies with retries
+RUN for i in 1 2 3; do \
+      apt-get update && \
+      apt-get install -y --no-install-recommends \
+        ca-certificates \
+        wget \
+        && rm -rf /var/lib/apt/lists/* && break || sleep 10; \
+    done
 
 # Create app user for security
 RUN useradd -m -u 1000 appuser

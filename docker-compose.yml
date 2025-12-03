@@ -6,6 +6,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Proxy configuration for build (optional)
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
     container_name: analytics-backend
     ports:
       - "${BACKEND_PORT:-3000}:3000"
@@ -36,16 +41,20 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        # Build-time API URL (use relative URLs so nginx can proxy)
-        - VITE_API_URL=
+        # Proxy configuration for build (optional)
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
+        # API URL pointing directly to backend
+        - VITE_API_URL=http://localhost:3000
     container_name: analytics-frontend
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "${FRONTEND_PORT:-5173}:3001"
     depends_on:
       - backend
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:80/health || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3001 || exit 1"]
       interval: 30s
       timeout: 3s
       retries: 3
