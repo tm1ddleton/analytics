@@ -1,6 +1,28 @@
 import type { AnalyticUpdate, ProgressUpdate } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+// Use relative URLs if VITE_API_URL is empty or not set (for Docker/production with nginx proxy)
+// Otherwise use the provided URL or default to localhost for development
+// Note: We use a function to get the origin at runtime to ensure the port is included
+// In production builds, VITE_API_URL="" gets replaced with "" by Vite
+const envApiUrl = import.meta.env.VITE_API_URL;
+
+// Function to get the API base URL at runtime (not at build time)
+function getApiBaseUrl(): string {
+  // If VITE_API_URL is explicitly set and non-empty, use it
+  if (envApiUrl && envApiUrl !== '' && envApiUrl.trim() !== '') {
+    return envApiUrl;
+  }
+  
+  // Otherwise, use the current page origin (includes port, e.g., http://localhost:5173)
+  if (typeof window !== 'undefined' && window.location) {
+    return window.location.origin;
+  }
+  
+  // Fallback for SSR or non-browser environments
+  return 'http://localhost:3000';
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 export function connectToStream(
   sessionId: string,

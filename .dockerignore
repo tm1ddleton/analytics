@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+# Note: Cargo.lock is needed for reproducible builds, don't exclude it
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+agent-os/
+docs/
+*.md
+!README.md
+
+# Frontend (if building separately)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+backend.log
+frontend.log
+
+# Database (will be mounted or created in container)
+analytics.db
+*.db
+
+# Scripts
+run-demo.sh
+stop-demo.sh
+
+# Test files
+tests/
+
+# Examples
+examples/
+
+# Temporary files
+tmp/
+*.tmp
+

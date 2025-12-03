@@ -21,7 +21,47 @@ This POC implements a complete analytics platform featuring:
 
 ## 🚀 Quick Start
 
-### Run the Demo
+### Docker (Recommended for Production)
+
+**Automatic Database Loading:**
+- If you have an `analytics.db` file in the project root, it will be automatically copied and used
+- The startup scripts (`docker-up.bat` or `docker-up.sh`) handle this automatically
+
+**Windows Users:**
+```batch
+REM Start services (automatically uses analytics.db if present)
+docker-up.bat
+
+REM View logs
+docker-logs.bat
+
+REM Stop services
+docker-down.bat
+```
+
+**Linux/macOS Users:**
+```bash
+# Start services (automatically uses analytics.db if present)
+./docker-up.sh
+# Or use docker compose directly:
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+```
+
+**Note:** Use `docker compose` (space) - Docker Compose V2 is integrated into Docker CLI.
+
+The server will be available at:
+- Frontend: `http://localhost:5173`
+- Backend API: `http://localhost:3000`
+
+See [DOCKER.md](DOCKER.md) for detailed Docker instructions and all available batch files.
+
+### Run the Demo (Local Development)
 
 ```bash
 ./run-demo.sh

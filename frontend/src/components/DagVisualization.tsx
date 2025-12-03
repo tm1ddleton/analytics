@@ -173,10 +173,6 @@ function getLayoutedElements(
     type: 'smoothstep', // Stepped edges that route around obstacles better
     animated: true,
     style: { stroke: '#1976d2', strokeWidth: 2 },
-    markerEnd: {
-      type: 'arrowclosed',
-      color: '#1976d2',
-    },
   }));
 
   return { nodes: layoutedNodes, edges: layoutedEdges };
@@ -239,7 +235,6 @@ export function DagVisualization({ dag, loading, error }: DagVisualizationProps)
           type: 'smoothstep',
           animated: true,
         }}
-        connectionLineType="smoothstep"
         // Prevent edges from intersecting with nodes by using proper routing
         nodeExtent={undefined} // Allow nodes anywhere
       >

@@ -7,7 +7,44 @@ import type {
   DagVisualization,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+// Use relative URLs if VITE_API_URL is empty or not set (for Docker/production with nginx proxy)
+// Otherwise use the provided URL or default to localhost for development
+// Note: We use a function to get the origin at runtime to ensure the port is included
+// In production builds, VITE_API_URL="" gets replaced with "" by Vite
+const envApiUrl = import.meta.env.VITE_API_URL;
+
+// Function to get the API base URL at runtime (not at build time)
+function getApiBaseUrl(): string {
+  // If VITE_API_URL is explicitly set and non-empty, use it
+  if (envApiUrl && envApiUrl !== '' && envApiUrl.trim() !== '') {
+    return envApiUrl;
+  }
+  
+  // Otherwise, use the current page origin (includes port, e.g., http://localhost:5173)
+  if (typeof window !== 'undefined' && window.location) {
+    // Explicitly construct the origin with port to ensure it's always included
+    const protocol = window.location.protocol; // http: or https:
+    const hostname = window.location.hostname; // localhost or 127.0.0.1
+    const port = window.location.port; // 5173 (empty string for default ports 80/443)
+    
+    // Use 127.0.0.1 instead of localhost to avoid browser hostname resolution issues
+    // that might strip the port
+    const resolvedHostname = hostname === 'localhost' ? '127.0.0.1' : hostname;
+    
+    // Construct origin explicitly to ensure port is always included
+    if (port) {
+      return `${protocol}//${resolvedHostname}:${port}`;
+    } else {
+      // Default ports - use origin as-is (shouldn't happen in our case since we're on 5173)
+      return window.location.origin;
+    }
+  }
+  
+  // Fallback for SSR or non-browser environments
+  return 'http://localhost:3000';
+}
+
+const API_BASE_URL = getApiBaseUrl();
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -18,7 +55,16 @@ const apiClient = axios.create({
 
 export async function getAssets(): Promise<Asset[]> {
   try {
-    const response = await apiClient.get<{ assets: Asset[] }>('/assets');
+    // Construct full URL to avoid axios baseURL issues
+    const url = API_BASE_URL.endsWith('/') 
+      ? `${API_BASE_URL}assets` 
+      : `${API_BASE_URL}/assets`;
+    
+    const response = await axios.get<{ assets: Asset[] }>(url, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
     return response.data.assets;
   } catch (error) {
     console.error('Failed to fetch assets:', error);
