@@ -6,6 +6,17 @@ This document proposes the architecture for implementing the Solactive Systemati
 
 ## Node Architecture
 
+### Architecture Layers: Calculators vs Definitions
+
+**Key Distinction**:
+- **Calculators**: Pure functions in `src/analytics/calculators.rs` (e.g., `weighted_sum()`, `transaction_cost_return()`)
+- **Definitions**: Nodes registered in `AnalyticRegistry` (e.g., `ExcessReturnDefinition`, `RollingFuturesLevelDefinition`)
+- **Relationship**: Definitions use calculators + executors + containers to create DAG nodes
+
+**Example**:
+- `WeightedSum` is a **calculator** (pure function: `weighted_sum(values, weights) -> f64`)
+- `ExcessReturn` is a **definition** (node that uses `WeightedSum` calculator + `MergeExecutor`)
+
 ### General-Purpose Nodes (Add to Main Registry)
 
 These nodes are reusable across different index calculations and should be added to the main `AnalyticRegistry`:
@@ -143,28 +154,42 @@ impl AnalyticExecutor for RecursiveExecutor {
 - **Index Calculations**: New use case - maintains index level and composition
 - **Cash Assets**: New use case - maintains cash level
 
-#### 1. WeightedSum Merge Node (Uses Existing MergeExecutor)
+#### 1. WeightedSum Calculator (Pure Math Function)
+**Purpose**: Calculate weighted sum of values
+
+**Approach**: Domain-agnostic pure function
+- Input: Values and weights
+- Output: Weighted sum
+- Formula: `Σ w_i × value_i`
+
+**Implementation**:
+- **Calculator**: `weighted_sum(values: &[f64], weights: &[f64]) -> f64` in `src/analytics/calculators.rs`
+- Pure math function, reusable across many definitions
+
+**Usage**: Used by definitions like `WeightedSumMergeDefinition`, `ExcessReturnDefinition`, etc.
+
+#### 1b. WeightedSumMerge Definition (Uses WeightedSum Calculator)
 **Purpose**: Calculate weighted sum of component returns
 
-**Approach**: Compose existing nodes - no new calculator needed
+**Approach**: Compose existing nodes - uses WeightedSum calculator
 - Use existing `ArithReturnAnalytic` to calculate returns for each component
-- Use `MergeExecutor` to combine multiple return inputs with weights
+- Use `MergeExecutor` with `WeightedSum` calculator to combine multiple return inputs with weights
 - Reuse existing arithmetic returns infrastructure
 
 **DAG Structure**:
 ```
 Component1 Level ──> ArithReturn ──┐
 Component2 Level ──> ArithReturn ──┤
-Component3 Level ──> ArithReturn ──┼──> WeightedSumMerge (with weights)
+Component3 Level ──> ArithReturn ──┼──> WeightedSumMerge (uses WeightedSum calculator)
 ...                                 │
 ComponentN Level ──> ArithReturn ──┘
 ```
 
 **Implementation**: 
-- New Definition: `WeightedSumDefinition` 
-- Uses `MergeExecutor` with N return nodes as parents
-- Merge function closure: `Σ w_i × return_i` where weights come from target weights data
-- Location: `src/analytics/registry.rs` (new definition, uses existing MergeExecutor)
+- **Definition**: `WeightedSumMergeDefinition` in `src/analytics/registry.rs`
+- **Calculator**: Uses `weighted_sum()` from `src/analytics/calculators.rs`
+- **Executor**: `MergeExecutor` with N return nodes as parents
+- Merge function closure: Calls `weighted_sum()` with weights from target weights data
 
 #### 2. Cash Asset Node (Interest Accrual)
 **Purpose**: Model cash/funding as an asset that accrues interest
@@ -188,30 +213,29 @@ ComponentN Level ──> ArithReturn ──┘
 - Cash return = `(Cash_t / Cash_{t-1} - 1)` = `rate × DCF/365`
 - This is just an arithmetic return calculation - no new calculator needed!
 
-**Excess Return Pattern** (using WeightedSum with negative weights):
+#### 3b. ExcessReturn Definition (Uses WeightedSum Calculator)
+**Purpose**: Calculate excess return by differencing asset return and cash return
+
+**Approach**: Uses `WeightedSum` calculator with negative weights
+- **Calculator**: Uses `weighted_sum()` with weights `[1, -1]`
+- Formula: `asset_return - cash_return = weighted_sum([asset_return, cash_return], [1, -1])`
+- No separate Difference calculator needed - WeightedSum is sufficient!
+
+**DAG Structure**:
 ```
 Asset Total Return ──┐
-                     ├──> WeightedSum([1, -1]) ──> Excess Return
+                     ├──> ExcessReturn (uses WeightedSum calculator with [1, -1] weights)
 Cash Asset Return ──┘
 ```
 
-**Note**: WeightedSum can handle differences using negative weights: `1 × asset_return + (-1) × cash_return = asset_return - cash_return`
-- No separate Difference calculator needed - WeightedSum is sufficient!
-
-#### 5. Weighted Sum Calculator (Pure Math)
-**Purpose**: Calculate weighted sum of values
-
-**Approach**: Domain-agnostic pure function
-- Input: Values and weights
-- Output: Weighted sum
-- Formula: `Σ w_i × value_i`
-
 **Implementation**:
-- New Calculator: `weighted_sum(values: &[f64], weights: &[f64]) -> f64`
-- Can be used for any weighted aggregation
-- Location: `src/analytics/calculators.rs` (pure math function)
+- **Definition**: `ExcessReturnDefinition` in `src/analytics/registry.rs`
+- **Calculator**: Uses `weighted_sum()` from `src/analytics/calculators.rs`
+- **Executor**: `MergeExecutor` with 2 return nodes as parents
+- Merge function: Calls `weighted_sum([asset_return, cash_return], [1, -1])`
 
-#### 6. Transaction Cost Return Node
+
+#### 4. Transaction Cost Return Node
 **Purpose**: Calculate transaction costs as a return stream
 
 **Approach**: Calculate transaction cost as a return (not a level)
@@ -237,7 +261,7 @@ Cash Asset Return ──┘
 
 **See**: `cost-implementation-detail.md` for full implementation details
 
-#### 7. Replication Cost Return Node
+#### 5. Replication Cost Return Node
 **Purpose**: Calculate replication costs as a return stream
 
 **Approach**: Calculate replication cost as a return (not a level)
@@ -264,7 +288,7 @@ Cash Asset Return ──┘
 
 **See**: `cost-implementation-detail.md` for full implementation details
 
-#### 4. Day Count / Funding Asset Node
+#### 6. Day Count / Funding Asset Node
 **Purpose**: Model day count effects as an asset
 
 **Approach**: Treat day count/funding as an asset that compounds
@@ -343,14 +367,10 @@ Cash Asset Return ──┘
 - Portfolio construction: Build portfolios from flattened composition
 - Reporting: Present flat view of nested index structure
 
-### Index-Specific Nodes (Factory-Generated)
-
-These nodes are specific to the SOLSTAE index and should be generated from rulebook configuration:
-
-#### 1. RollingFuturesLevel Node (General-Purpose, Not SOLSTAE-Specific)
+#### 7. RollingFuturesLevel Definition (General-Purpose)
 **Purpose**: Calculate rolling futures level with contract transitions
 
-**Note**: This should be implemented as a general-purpose feature, not SOLSTAE-specific.
+**Note**: Futures rolling is a generic activity used in many indices - this is a general-purpose definition.
 
 **Configuration Required**:
 - Roll schedule (Table 4: Active Contract, Table 5: Next Active Contract)
@@ -360,7 +380,7 @@ These nodes are specific to the SOLSTAE index and should be generated from ruleb
 - FX conversion requirements
 
 **Components**:
-- **Calculator**: Pure function for weighted return calculation (uses WeightedSum)
+- **Calculator**: `rolling_futures_return()` function in `src/analytics/calculators.rs` (uses `weighted_sum()` calculator)
 - **Container**: `RollingFuturesLevelAnalytic` - stores rolling level state
 - **Executor**: `RecursiveExecutor` - maintains previous level for incremental calculation
 - **Definition**: `RollingFuturesLevelDefinition` - registers in main registry (general-purpose)
@@ -369,13 +389,17 @@ These nodes are specific to the SOLSTAE index and should be generated from ruleb
 ```
 ActiveReturn_t = (Px_active_t / Px_active_{t-1} - 1)
 NextReturn_t = (Px_next_t / Px_next_{t-1} - 1)
-FuturesReturn_t = WeightedSum([ActiveReturn_t, NextReturn_t], [w_active, w_next]) × FXConversion_t
+FuturesReturn_t = weighted_sum([ActiveReturn_t, NextReturn_t], [w_active, w_next]) × FXConversion_t
 RFL_t = RFL_{t-1} × (1 + FuturesReturn_t)
 ```
 
-**Composition**: Uses WeightedSum calculator (pure math) + FX conversion
+**Composition**: Uses `weighted_sum()` calculator (pure math) + FX conversion
 
-#### 2. ETF Total Return Node
+### Index-Specific Nodes (Factory-Generated)
+
+These nodes are specific to the SOLSTAE index and should be generated from rulebook configuration:
+
+#### 1. ETF Total Return Node
 **Purpose**: Calculate ETF total return with dividend reinvestment
 
 **Components**:
@@ -390,13 +414,13 @@ ETFTotalReturn_t = (ETF_Close_t + div_t) / ETF_Close_{t-1}
 ETFLevel_t = ETFLevel_{t-1} × ETFTotalReturn_t
 ```
 
-#### 2b. ETF Excess Return (Composed from Total Return - Cash)
+#### 1b. ETF Excess Return (Composed from Total Return - Cash)
 **Purpose**: Calculate ETF excess return by differencing total return and cash
 
 **Composition**:
 ```
 ETF Total Return ──┐
-                   ├──> Difference ──> ETF Excess Return
+                   ├──> ExcessReturn (uses WeightedSum calculator with [1, -1] weights)
 Cash Asset (SOFR/LIBOR) ──┘
 ```
 
@@ -406,9 +430,9 @@ Cash Asset (SOFR/LIBOR) ──┘
 - LIBOR RIC (USD3MFSR=)
 - LIBOR offset (-0.26161%)
 
-**No new node needed**: Composed from ETF Total Return + Cash Asset + Difference calculator
+**No new node needed**: Composed from ETF Total Return + Cash Asset + ExcessReturn definition (which uses WeightedSum calculator)
 
-#### 3. BaseIndex Node
+#### 2. BaseIndex Node
 **Purpose**: Calculate base index from component levels and target weights, output composition
 
 **Components**:
@@ -419,11 +443,19 @@ Cash Asset (SOFR/LIBOR) ──┘
 
 **DAG Structure**:
 ```
+StartingState ────┐ (provides initial base index level + composition)
 Component1 Level ──> ArithReturn ──┐
 Component2 Level ──> ArithReturn ──┤
 ...                                 ├──> WeightedSumMerge ──> BaseIndex (recursive) ──> IndexComposition
 ComponentN Level ──> ArithReturn ──┘
 ```
+
+**Dependencies**:
+- **StartingState node** (provides initial base index level + composition - required parent)
+- Component level nodes (ETFExcessReturn, RollingFuturesLevel) OR nested index nodes
+- Target weights (from external source)
+- Component prices (from component level nodes) OR nested index compositions
+- Uses existing `ArithReturnAnalytic` for component returns
 
 **Output**: `IndexComposition` struct containing:
 - Level: `f64` (base index level)
@@ -447,19 +479,50 @@ ComponentN Level ──> ArithReturn ──┘
 - Recursively multiplies weights/quantities through hierarchy
 - Returns composition with only `IndexComponent::Asset` entries
 
+#### 3. StartingState Node (General-Purpose)
+**Purpose**: Provide initial index level and composition for index calculation
+
+**Key Insight**: Index calculation is no different from any other node - it needs starting values. This node provides them, abstracting away the source (database checkpoint vs config).
+
+**Components**:
+- **Calculator**: None - this is a data source node
+- **Container**: `StartingStateAnalytic` - provides initial state
+- **Executor**: `PassthroughExecutor` or `DataProviderExecutor` - loads from database or config
+- **Definition**: `StartingStateDefinition` - registers in main registry (general-purpose)
+
+**Output**: `IndexComposition` struct containing:
+- Level: `f64` (initial index level)
+- Composition: `IndexComposition` (initial composition, can be empty)
+- Timestamp: `DateTime<Utc>` (start date)
+
+**Data Source Logic**:
+1. Query database for latest checkpoint before requested start date
+2. If checkpoint found: return checkpoint level and composition (hot start)
+3. If no checkpoint: return config values (initial level, initial composition, start date) (cold start)
+
+**Persistence Note**: This node handles **reading** from persistence. **Writing** checkpoints is a separate concern handled by persistence layer (not part of calculation logic).
+
+**DAG Structure**:
+```
+StartingState Node (loads from DB or config)
+    │
+    └──> Provides initial level + composition
+```
+
 #### 4. IndexLevel Node (Composed from Multiple Assets)
 **Purpose**: Calculate final index level by differencing base return with costs, output composition
 
 **Composition**:
 ```
-BaseIndex Return ──┐
+StartingState ────┐
+BaseIndex Return ──┤
 ARF Asset ─────────┤
 TTC Asset ─────────├──> WeightedSum (with signs) ──> Net Return ──> Index Level (recursive) ──> IndexComposition
 TRC Asset ─────────┘
 ```
 
 **Components**:
-- **Calculator**: Uses `WeightedSum` calculator with signed weights
+- **Calculator**: Uses `weighted_sum()` calculator with signed weights
 - **Container**: `IndexLevelAnalytic` - stores index level and composition
 - **Executor**: `RecursiveExecutor` - maintains previous index level and composition
 - **Definition**: `IndexLevelDefinition` - registers in index-specific registry
@@ -473,11 +536,18 @@ TRC Asset ─────────┘
   - If quantities: Update quantities vector (if changed) + prices + divisor
 
 **Dependencies**:
+- **StartingState node** (provides initial level + composition - required parent)
 - BaseIndex composition node (provides base level + composition, can contain nested indices)
 - ARF Asset node (compounds at 0.4% p.a.)
 - TransactionCost Asset node
 - ReplicationCost Asset node
-- Uses WeightedSum with weights: [+1, -1, -1, -1] to subtract costs
+- Uses `weighted_sum()` calculator with weights: [+1, -1, -1, -1] to subtract costs
+
+**Key Point**: IndexLevel node is **no different from any other recursive node**. It:
+- Takes StartingState as input (like any other node takes parent outputs)
+- Uses RecursiveExecutor (like EMA, CashAsset, etc.)
+- Maintains state (previous level + composition)
+- No special "hot start" logic - it's just a regular DAG node
 
 **Formula** (conceptual):
 ```
@@ -494,9 +564,9 @@ Index_t = max[0, Index_{t-1} × (1 + NetReturn_t)]
 - Useful for risk analysis and portfolio construction
 - Quantities representation accurately models risk (e.g., offsetting cash in FX-hedged)
 
-**Benefits**: All costs modeled as assets, composable through WeightedSum, composition output configurable, supports nested indices
+**Benefits**: All costs modeled as assets, composable through `weighted_sum()` calculator, composition output configurable, supports nested indices
 
-#### 5. FX-Hedged Index Node (General-Purpose)
+#### 5. FX-Hedged Index Definition (General-Purpose)
 **Purpose**: Calculate FX-hedged index level using explicit hedge model
 
 **Model** (models risk correctly):
@@ -508,15 +578,15 @@ Index_t = max[0, Index_{t-1} × (1 + NetReturn_t)]
 **DAG Structure**:
 ```
 USD Index Level ──┐
-                  ├──> Convert to GBP (× FX_t) ──┐
-GBP Cash Level ───┘ (Index_{t-1} × FX_{t-1}, no interest) ├──> Difference ──> Net GBP Return ──> Hedged Index Level
+                  ├──> Convert to GBP (fx_convert calculator) ──┐
+GBP Cash Level ───┘ (Index_{t-1} × FX_{t-1}, no interest) ├──> ExcessReturn (WeightedSum calculator) ──> Net GBP Return ──> Hedged Index Level
 ```
 
 **Components**:
 - **Index Asset Node**: Provides base currency index level (uses existing IndexLevel node)
 - **Cash Asset Node**: Fixed at `Index_{t-1} × FX_{t-1}` (no interest accrual)
-- **FX Conversion Calculator**: Multiply index by current FX rate
-- **Difference Calculator**: Net return = (Index in hedge currency) - (Cash asset)
+- **FX Conversion Calculator**: `fx_convert()` function in `src/analytics/calculators.rs` - multiply index by current FX rate
+- **Excess Return**: Uses `ExcessReturnDefinition` (which uses WeightedSum calculator) - Net return = (Index in hedge currency) - (Cash asset)
 - **Container**: `FXHedgedIndexAnalytic` - stores hedged index level
 - **Executor**: `RecursiveExecutor` - maintains previous hedged index level and cash asset value
 - **Definition**: `FXHedgedIndexDefinition` - registers in main registry (general-purpose)
@@ -629,109 +699,87 @@ calculation:
 
 ### Database Schema Extension
 
-Extend existing `analytics` table or create index-specific tables:
+**Use existing `analytics` table** - no schema changes needed. This approach scales to 10s of 1000s of indices without requiring migrations for each new index.
 
-#### Option 1: Extend Analytics Table (Recommended)
 Use existing `analytics` table with index-specific `analytics_name`:
 
 ```sql
 -- Index level storage
 INSERT INTO analytics (asset_key, date, analytics_name, value)
-VALUES ('INDEX', '2024-01-01', 'solstae_index_level', '{"level": 100.5, "base_index": 100.3}');
+VALUES ('solstae_index', '2024-01-01', 'index_level', '{"level": 100.5, "base_index": 100.3}');
 
 -- Composition storage (as JSON)
 INSERT INTO analytics (asset_key, date, analytics_name, value)
-VALUES ('INDEX', '2024-01-01', 'solstae_composition', 
+VALUES ('solstae_index', '2024-01-01', 'index_composition', 
   '{"weights": {"EEM.P": 0.1, "0#ES:": 0.15, ...}, 
     "levels": {"EEM.P": 105.2, "0#ES:": 102.1, ...}}');
 ```
 
+**Key Design Decisions**:
+- **`asset_key`**: Index identifier (e.g., `'solstae_index'`, `'custom_index_123'`)
+- **`analytics_name`**: Type of data (`'index_level'`, `'index_composition'`)
+- **`value`**: JSON blob containing structured data (flexible, no schema changes needed)
+
 **Advantages**:
-- Reuses existing schema
-- Composition stored as JSON (flexible)
-- Simple query pattern
+- ✅ No migrations required for new indices
+- ✅ Scales to 10s of 1000s of indices
+- ✅ Reuses existing schema
+- ✅ Composition stored as JSON (flexible)
+- ✅ Simple query pattern: `WHERE asset_key = 'index_name' AND analytics_name = 'index_level'`
 
-#### Option 2: Dedicated Index Tables
-Create separate tables for index-specific data:
+## Starting State and Persistence
 
-```sql
-CREATE TABLE index_levels (
-    index_name TEXT NOT NULL,
-    date TEXT NOT NULL,
-    index_level REAL NOT NULL,
-    base_index_level REAL NOT NULL,
-    PRIMARY KEY (index_name, date)
-);
+### StartingState Node (Separate Concern)
 
-CREATE TABLE index_composition (
-    index_name TEXT NOT NULL,
-    date TEXT NOT NULL,
-    composition_json TEXT NOT NULL,  -- JSON with weights and levels
-    PRIMARY KEY (index_name, date)
-);
+**Key Architectural Principle**: Index calculation is **no different from any other node**. It needs starting values, which come from a **StartingState node** in the DAG.
+
+**StartingState Node**:
+- Provides initial level and composition to IndexLevel node
+- Loads from database (checkpoint) if available, otherwise uses config values
+- **No special logic in IndexLevel node** - it just takes StartingState as input like any other parent
+
+**DAG Structure**:
+```
+StartingState Node ──> IndexLevel Node ──> IndexComposition
+     │                      │
+     └──> Loads from DB     └──> Regular recursive node
+          or config              (no special handling)
 ```
 
-**Advantages**:
-- More structured
-- Better query performance for index-specific queries
-- Clearer separation
+### Persistence (Separate Concern)
 
-**Recommendation**: Use Option 1 for MVP (simpler), Option 2 for production (better performance).
-
-## Hot Start Implementation
-
-### Checkpoint Strategy
-
-Store checkpoint data to enable hot start:
+**Writing checkpoints** is handled by the persistence layer, **not** by calculation nodes:
 
 ```rust
-pub struct IndexCheckpoint {
-    pub index_name: String,
-    pub checkpoint_date: NaiveDate,
-    pub index_level: f64,
-    pub base_index_level: f64,
-    pub component_levels: HashMap<String, f64>,  // component_id -> level
-    pub composition: IndexComposition,  // weights and levels
+// Persistence layer (separate from calculation)
+pub fn save_checkpoint(
+    index_name: &str,
+    date: NaiveDate,
+    composition: &IndexComposition,
+) -> Result<(), Error> {
+    // Save to database
+    // This is called AFTER calculation, not during
 }
 ```
 
-### Query Logic
+**Storage Pattern**:
 
-```rust
-impl IndexCalculation {
-    pub fn calculate_with_hot_start(
-        &self,
-        start_date: NaiveDate,
-        end_date: NaiveDate,
-    ) -> Result<Vec<IndexLevel>, Error> {
-        // 1. Find latest checkpoint <= start_date
-        let checkpoint = self.find_checkpoint(start_date)?;
-        
-        // 2. Use checkpoint as initial state
-        let mut state = IndexState::from_checkpoint(checkpoint);
-        
-        // 3. Calculate forward from checkpoint
-        for date in dates_between(start_date, end_date) {
-            let level = self.calculate_next_day(&mut state, date)?;
-            self.store_checkpoint(&state, date)?;
-        }
-        
-        Ok(levels)
-    }
-}
-```
-
-### Storage Pattern
-
-Store checkpoints periodically (e.g., daily):
+Store checkpoints using the same schema as index levels/composition:
 
 ```sql
--- Store checkpoint
+-- Store checkpoint (same structure as index_level, just different analytics_name)
 INSERT INTO analytics (asset_key, date, analytics_name, value)
-VALUES ('INDEX', '2024-01-01', 'solstae_checkpoint', 
+VALUES ('solstae_index', '2024-01-01', 'index_checkpoint', 
   '{"index_level": 100.5, "base_index": 100.3, 
     "component_levels": {...}, "composition": {...}}');
 ```
+
+**Benefits of This Approach**:
+- ✅ Index calculation is a regular DAG node (no special logic)
+- ✅ Persistence is separate concern (can be added/removed independently)
+- ✅ StartingState node handles data loading (database or config)
+- ✅ Hot start vs cold start is transparent to IndexLevel node
+- ✅ Generic and reusable across all indices
 
 ## Push vs Pull Mode
 
@@ -740,14 +788,15 @@ VALUES ('INDEX', '2024-01-01', 'solstae_checkpoint',
 **Use Case**: Calculate index for a date range on-demand
 
 **Flow**:
-1. Query database for checkpoint before start date
-2. Load target weights for date range
-3. Calculate index levels forward from checkpoint
+1. Build DAG with StartingState node (loads from checkpoint or config)
+2. Execute DAG in pull mode (StartingState provides initial values to IndexLevel)
+3. IndexLevel node calculates forward using RecursiveExecutor
 4. Return time series
 
 **Implementation**:
 - Extend existing pull-mode DAG execution
-- Add hot start checkpoint loading
+- StartingState node handles checkpoint loading (transparent to IndexLevel)
+- IndexLevel node is regular recursive node (no special handling)
 - Calculate missing dates incrementally
 
 ### Push Mode (Real-time Updates)
@@ -756,14 +805,16 @@ VALUES ('INDEX', '2024-01-01', 'solstae_checkpoint',
 
 **Flow**:
 1. Receive new target weights for day t
-2. Load previous day's state (index level, component levels)
-3. Calculate new index level
-4. Store checkpoint
+2. Execute DAG in push mode (StartingState provides previous day's state)
+3. IndexLevel node calculates new level using RecursiveExecutor
+4. Persistence layer saves checkpoint (separate from calculation)
 5. Stream update via SSE
 
 **Implementation**:
 - Use existing push-mode DAG execution
-- Add checkpoint persistence after each update
+- StartingState node loads previous day's checkpoint
+- IndexLevel node is regular recursive node (no special handling)
+- Persistence layer saves checkpoints after calculation (separate concern)
 - Support SSE streaming for real-time updates
 
 ## Data Provider Extensions
@@ -811,21 +862,21 @@ Extend `DataProvider` trait to support:
 ## Implementation Phases
 
 ### Phase 1: Foundation (MVP)
-1. Create general-purpose calculators (WeightedSum, ExcessReturn, etc.)
+1. Create general-purpose calculators (`weighted_sum()`, etc.) and definitions (`ExcessReturnDefinition`, `RollingFuturesLevelDefinition`, etc.)
 2. Implement basic index calculation (without futures rolling)
 3. Store index level and composition as JSON
 4. Support pull-mode calculation
 
 ### Phase 2: Futures Rolling
-1. Implement RollingFuturesLevel node
+1. Implement `RollingFuturesLevelDefinition` (uses `weighted_sum()` calculator)
 2. Add futures contract data provider
 3. Implement roll schedule logic
 4. Add FX conversion
 
-### Phase 3: Hot Start
-1. Implement checkpoint storage
-2. Add checkpoint loading logic
-3. Support hot start in pull mode
+### Phase 3: StartingState Node and Persistence
+1. Implement StartingState node (loads from database or config)
+2. Update IndexLevel node to take StartingState as parent (no special logic)
+3. Implement persistence layer for checkpoint storage (separate from calculation)
 4. Optimize checkpoint frequency
 
 ### Phase 4: Push Mode & Real-time
