@@ -50,7 +50,7 @@ pub struct AssetInfo {
 
 /// GET /assets - List all available assets
 pub async fn list_assets(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> Result<Json<AssetsResponse>, ApiError> {
     // For POC, we'll return a simple list
     // In production, this would query the database for actual assets

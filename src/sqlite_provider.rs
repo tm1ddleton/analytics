@@ -385,6 +385,104 @@ impl SqliteDataProvider {
         Ok(future)
     }
 
+    /// Lists all assets in the database with their metadata.
+    ///
+    /// # Returns
+    /// Returns a vector of tuples containing (asset_key, asset_type, name, data_available_from, data_available_to).
+    /// If an asset cannot be deserialized, it will be skipped.
+    ///
+    /// # Errors
+    /// Returns an error if the database query fails.
+    pub fn list_all_assets(
+        &self,
+    ) -> Result<Vec<(AssetKey, String, String, Option<NaiveDate>, Option<NaiveDate>)>, DataProviderError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT asset_key, asset_data FROM assets ORDER BY asset_key")
+            .map_err(|e| DataProviderError::Other(format!("Failed to prepare query: {}", e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let asset_key_str: String = row.get(0)?;
+                let asset_json: String = row.get(1)?;
+                Ok((asset_key_str, asset_json))
+            })
+            .map_err(|e| DataProviderError::Other(format!("Failed to query assets: {}", e)))?;
+
+        let mut assets = Vec::new();
+
+        for row_result in rows {
+            let (asset_key_str, asset_json) = row_result.map_err(|e| {
+                DataProviderError::Other(format!("Failed to read asset row: {}", e))
+            })?;
+
+            // Try to parse as Equity first, then Future
+            let asset_info = if let Ok(equity) = serde_json::from_str::<Equity>(&asset_json) {
+                let asset_key = equity.key().clone();
+                let asset_type = "equity".to_string();
+                let name = equity.name().to_string();
+                
+                // Query date range from time_series_data
+                let date_range = self.get_asset_date_range(&asset_key_str)?;
+                
+                (asset_key, asset_type, name, date_range.0, date_range.1)
+            } else if let Ok(future) = serde_json::from_str::<Future>(&asset_json) {
+                let asset_key = future.key().clone();
+                let asset_type = "future".to_string();
+                let name = future.name().to_string();
+                
+                // Query date range from time_series_data
+                let date_range = self.get_asset_date_range(&asset_key_str)?;
+                
+                (asset_key, asset_type, name, date_range.0, date_range.1)
+            } else {
+                // Skip assets that can't be deserialized
+                continue;
+            };
+
+            assets.push(asset_info);
+        }
+
+        Ok(assets)
+    }
+
+    /// Gets the date range for an asset from time_series_data table.
+    ///
+    /// # Arguments
+    /// * `asset_key_str` - The asset key as a string
+    ///
+    /// # Returns
+    /// Returns (min_date, max_date) if data exists, or (None, None) if no data.
+    fn get_asset_date_range(
+        &self,
+        asset_key_str: &str,
+    ) -> Result<(Option<NaiveDate>, Option<NaiveDate>), DataProviderError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT MIN(date(timestamp)), MAX(date(timestamp)) 
+                 FROM time_series_data 
+                 WHERE asset_key = ?1",
+            )
+            .map_err(|e| DataProviderError::Other(format!("Failed to prepare date range query: {}", e)))?;
+
+        let result = stmt.query_row([asset_key_str], |row| {
+            let min_date_str: Option<String> = row.get(0)?;
+            let max_date_str: Option<String> = row.get(1)?;
+
+            let min_date = min_date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
+            let max_date = max_date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
+
+            Ok((min_date, max_date))
+        });
+
+        match result {
+            Ok(dates) => Ok(dates),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok((None, None)),
+            Err(e) => Err(DataProviderError::Other(format!("Failed to query date range: {}", e))),
+        }
+    }
+
     /// Stores an analytics result in the database.
     ///
     /// The analytics value is stored as a JSON blob for flexibility.
