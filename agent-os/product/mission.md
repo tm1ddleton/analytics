@@ -1,70 +1,125 @@
 # Product Mission
 
 ## Pitch
-Financial Analytics Engine is a Rust library and calculation engine that helps quantitative traders and researchers build systematic trading strategies by providing real-time and historical financial analytics through a flexible, scalable, and performant computation platform.
+Quantitative Event Engine is a Rust library and computation platform that helps equity derivatives trading operations manage the complete lifecycle of structured products and their hedges. It provides a unified event-driven architecture where the Ledger is the central abstraction—enabling real-time accounting, index calculation, research simulation, and risk aggregation through the same core components.
 
 ## Users
 
 ### Primary Customers
-- **Quantitative Traders**: Professionals building systematic trading strategies who need real-time analytics that update as market data streams in
-- **Research Analysts**: Quantitative researchers who need to download precomputed analytics via Python to explore and backtest new strategy ideas
+- **Structured Products Desks**: Teams managing the lifecycle of client-facing structured products (autocallables, reverse convertibles, certificates, warrants) who need real-time position tracking and P&L
+- **Index Operations**: Teams creating, calculating, and rebalancing proprietary indices who need high-speed simulation for research and real-time calculation for production
+- **Quantitative Researchers**: Analysts backtesting strategies, simulating portfolios, and researching new index methodologies who need maximum-speed in-memory computation
 
 ### User Personas
 
-**Trading Strategist** (25-45)
-- **Role:** Quantitative trader or portfolio manager
-- **Context:** Building and deploying systematic trading strategies that require real-time analytics updates
-- **Pain Points:** Existing analytics libraries are too slow, don't support real-time updates, or require complex data pipeline management. Need analytics that update automatically when new market data arrives.
-- **Goals:** Deploy strategies with analytics that update in real-time, scale to handle multiple assets and strategies simultaneously, and integrate seamlessly into trading systems
+**Structured Products Trader**
+- **Role:** Trader or portfolio manager on a structured products desk
+- **Context:** Managing lifecycle events (coupons, barriers, fixings, exercises) across a book of client positions and hedges.  Generating What-If scenarios and analyzing potential systematic hedging strategies
+- **Pain Points:** Fragmented systems for pricing, booking, and risk. Manual reconciliation between trading and accounting. No unified view across positions, indices, and hedges.
+- **Goals:** Single source of truth for positions, automated lifecycle event processing, real-time P&L and risk views sliced by any dimension (desk, client, strategy, product type).  Easy to generate research studies based on simple questions
 
-**Research Analyst** (25-50)
-- **Role:** Quantitative researcher or data scientist
-- **Context:** Exploring new trading strategies by analyzing historical analytics and testing hypotheses
-- **Pain Points:** Difficult to access precomputed analytics, slow iteration cycles when testing new ideas, analytics libraries don't integrate well with Python data science workflows
-- **Goals:** Quickly download precomputed analytics for specific assets and date ranges, work with familiar Python tools (Polars dataframes), and iterate rapidly on strategy research
+**Index Research Analyst**
+- **Role:** Quantitative analyst designing proprietary indices
+- **Context:** Researching index construction rules, backtesting rebalancing strategies, simulating years of history
+- **Pain Points:** Slow iteration cycles, separate tools for simulation vs production, difficulty translating research into production index calculation
+- **Goals:** Run high-speed simulations (years of data in seconds), seamlessly promote research indices to production, unified codebase for research and live calculation.  Ability to use official calculated values where these exist but also rapid prototyping in python either using REST APIs or PyO3 bindings.
+
+**Risk Manager**
+- **Role:** Risk officer or portfolio risk analyst
+- **Context:** Needs aggregated risk views across structured products, their hedges, and index exposures
+- **Pain Points:** Position data scattered across systems, manual decomposition of structured products to underlying exposures, no real-time flattened risk view
+- **Goals:** Unified risk aggregation, automatic decomposition/flattening of complex positions, real-time exposure monitoring
 
 ## The Problem
 
-### Fragmented Analytics Infrastructure
-Quantitative trading teams struggle with analytics libraries that are either too slow for real-time use, don't support incremental updates, or require complex data pipeline management. Existing solutions often force a choice between performance and flexibility, and don't provide unified access patterns for both real-time trading and historical research workflows.
+### Fragmented Lifecycle Management
+Equity derivatives operations struggle with disconnected systems: one for pricing, another for booking, another for risk, another for index calculation. Lifecycle events (coupons, barriers, corporate actions) require manual coordination. There's no unified view of how a client's structured product position, the desk's hedges, and the underlying index constituents relate.
 
-**Our Solution:** A unified Rust-based analytics engine that supports both push-mode (real-time incremental updates) and pull-mode (historical time series) computation, with explicit DAG-based wiring for transparent dependency management and optimal performance.
+**Our Solution:** A unified event-driven architecture where the Ledger is the central abstraction. The same event processing engine handles structured product lifecycles, index rebalancing, and hedge booking. Positions and indices are both "ledgers" that can be decomposed and flattened for unified risk views.
 
-### Limited Integration Options
-Traders and researchers need analytics accessible from multiple environments—embedded in Rust applications, via Python for research, and through web APIs for distributed systems. Current solutions typically support only one access pattern, forcing teams to build custom integration layers.
+### Research-Production Gap
+Index research teams build simulations that can't easily translate to production. Different codebases, different data models, different assumptions. What works in backtesting breaks in production.
 
-**Our Solution:** Multi-modal access including embedded Rust library, Python bindings via PyO3, REST API for distributed queries, and seamless Polars dataframe integration for Python workflows.
+**Our Solution:** The same engine runs in three modes—high-speed in-memory for research, streaming for real-time calculation, persistent for production accounting. Research code IS production code, just with different persistence and speed settings.
+
+### Inflexible Accounting
+Traditional ledger systems assume one booking treatment per event. But the same economic event (e.g., coupon payment) may require different ledger entries depending on legal entity, jurisdiction, accounting standard, client type, or business line.
+
+**Our Solution:** A two-call pattern separating "what happened" (product-level economics) from "how to book it" (configurable move rules). Multi-dimensional context matching enables the same event to generate different ledger entries based on any combination of attributes.
 
 ## Differentiators
 
-### Asset-Centric Architecture
-Unlike analytics libraries built on dataframe-first designs, we model assets as first-class objects with explicit relationships. This results in clearer code, better performance through optimized data structures, and more intuitive API design that matches how traders think about financial instruments.
+### Ledger as the Unifying Abstraction
+Unlike systems that treat positions and indices as separate concepts, we model everything as a ledger. An index IS a ledger of constituents. A swap on an index IS a position that decomposes into the index's ledger. This enables unified risk views through natural decomposition/flattening.
 
-### Dual-Mode Computation Engine
-Unlike single-mode analytics libraries, we support both push-mode (incremental updates) and pull-mode (time series generation) in the same unified engine. This results in one codebase that serves both real-time trading and historical research needs, reducing maintenance overhead and ensuring consistency.
+### Three-Mode Architecture
+Unlike systems that force a choice between speed and durability, we support three modes from the same codebase:
+- **In-memory**: Maximum speed for research, Monte Carlo, backtesting
+- **Streaming**: Real-time calculation for live indices and P&L
+- **Persistent**: Durable Postgres-backed accounting for production books
 
-### Explicit DAG-Based Wiring
-Unlike black-box analytics pipelines, we provide explicit DAG construction for analytics dependencies using proven Rust libraries. This results in transparent computation graphs, easier debugging, automatic optimization opportunities, and confidence in calculation correctness.
+### Event-Driven Lifecycle Processing
+Unlike batch-oriented systems, we process lifecycle events (fixings, barriers, coupons, exercises, corporate actions) through a unified event framework. The same trigger taxonomy handles structured products and indices.
 
-### Multi-Modal Access Patterns
-Unlike single-access-mode libraries, we provide embedded Rust, Python PyO3 bindings, REST API, and Polars integration from day one. This results in teams using the same analytics engine across all their workflows—from real-time trading to research notebooks—without custom integration work.
+### Multi-Dimensional Move Rules
+Unlike ledgers with hard-coded booking logic, we separate product economics from accounting treatment. Configurable move rules match on any combination of dimensions (entity, jurisdiction, product type, client type) to generate appropriate ledger entries.
+
+### Stateless Smart Contract Adapter
+Unlike monolithic systems, our core processing is stateless. The Smart Contract Adapter receives all context it needs, processes it, and returns results. This enables horizontal scaling, easy testing, and clean separation of concerns.
 
 ## Key Features
 
 ### Core Features
-- **Push-Mode Analytics**: Analytics automatically update when new market data arrives, enabling real-time strategy execution
-- **Pull-Mode Analytics**: Generate complete time series on-demand for historical analysis and backtesting
-- **DAG-Based Computation**: Explicitly wire analytics together as a directed acyclic graph using open-source Rust libraries for transparent dependencies
-- **Asset-Centric Data Model**: Assets modeled as objects rather than dataframe rows, providing intuitive API and optimized performance
+- **Unified Ledger Model**: Positions and indices as ledgers with decomposition relationships
+- **Event-Driven Processing**: 8 trigger types (expiry, coupon, fixing, barrier, continuous barrier, American exercise, dividends, stock splits)
+- **Two-Call Pattern**: Separate product-level action calculation from position-level move generation
+- **Multi-Dimensional Move Rules**: Configurable booking patterns based on context matching
+- **Portfolio Tagging**: Flexible position tagging for multi-dimensional views and P&L attribution
+
+### Product Coverage
+- **14 Structured Products**: Barrier Reverse Convertibles, Bonus Certificates, Warrants, Discount Certificates, Mini Certificates, Factor Certificates, Vanilla Options, and more
+- **10 Hedging Assets**: Equities, Bonds, Futures, Options, Interest Rate instruments, FX, Stock Borrow Loans
+
+### Operational Modes
+- **Research Mode**: In-memory, maximum speed for simulation and backtesting
+- **Production Calculation Mode**: Streaming for real-time index levels and P&L
+- **Production Accounting Mode**: Postgres-backed for durable audit trail
 
 ### Integration Features
-- **Embedded Rust Library**: Use the engine directly in Rust applications with zero-copy performance
-- **Python PyO3 Bindings**: Direct Python access to the Rust engine for maximum performance in research workflows
-- **REST API Server**: Query analytics by asset key and date range from distributed systems and web applications
-- **Polars Dataframe Export**: Analytics returned as Polars dataframes in Python for seamless integration with data science workflows
+- **Embedded Rust Library**: Direct integration for maximum performance
+- **REST API**: Transport-agnostic callbacks, stub API for testing/demo
+- **DAG Computation**: Integration with existing analytics DAG framework
 
-### Advanced Features
-- **Distributed & Scalable**: Architecture designed for horizontal scaling across multiple nodes
-- **Real-Time Strategy Updates**: Strategy outputs update automatically as new analytics are computed in push mode
-- **Historical Research Access**: Researchers can query precomputed analytics for specific assets and date ranges via Python API
+## Architecture Overview
 
+```
+                    +-------------------------------------+
+                    |     Event Framework (Triggers)      |
+                    |  (expiry, fixing, barrier, etc.)    |
+                    +-----------------+-------------------+
+                                      |
+                    +-----------------v-------------------+
+                    |     Smart Contract Adapter          |
+                    |  (stateless, two-call pattern)      |
+                    |                                     |
+                    |  Call 1: Product -> ProductAction   |
+                    |  Call 2: Positions + Rules -> Moves |
+                    +-----------------+-------------------+
+                                      |
+              +-----------------------+-----------------------+
+              |                                               |
+              v                                               v
+    +-------------------+                         +-------------------+
+    |  Position Ledger  |<----------------------->|   Index Ledger    |
+    | (products/hedges) |                         |  (constituents)   |
+    +-------------------+                         +-------------------+
+              |                                               |
+              +------------------------+----------------------+
+                                       |
+                            [DECOMPOSE/FLATTEN]
+                                       |
+                     +-----------------v-------------------+
+                     |         Unified Risk View           |
+                     |    (flattened underlying exposure)  |
+                     +-------------------------------------+
+```
