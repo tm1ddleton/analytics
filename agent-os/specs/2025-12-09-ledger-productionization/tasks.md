@@ -22,30 +22,30 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** None
 **Complexity:** L
 
-- [ ] 1.0 Complete shared product/asset domain model
-  - [ ] 1.1 Write 4-6 focused tests for domain types
+- [x] 1.0 Complete shared product/asset domain model
+  - [x] 1.1 Write 4-6 focused tests for domain types
     - Test Product enum discrimination and serialization
     - Test Asset enum discrimination and serialization
     - Test ProductId/AssetId key generation and equality
     - Test type conversions between Product and Asset (products can be traded as assets)
-  - [ ] 1.2 Define Product enum with 14 variants
+  - [x] 1.2 Define Product enum with 14 variants
     - BarrierReverseConvertible, BarrierReverseConvertiblePro
     - BonusCertificate, CappedBonusCertificate, CappedBonusProCertificate
     - CappedWarrant, DiscountCertificate, KnockOutWarrant
     - ReverseCappedBonusCertificate, ReverseConvertible
     - MiniCertificate, OpenEndTurbo, FactorCertificate
     - VanillaOption
-  - [ ] 1.3 Define Asset enum with 10 variants
+  - [x] 1.3 Define Asset enum with 10 variants
     - Equity, Bond, Future, BarrierOption
     - InterestRateFuture, InterestRateOption
     - Cash, FxOption, FxSwap, StockBorrowLoan
-  - [ ] 1.4 Define shared Instrument enum (Product | Asset)
+  - [x] 1.4 Define shared Instrument enum (Product | Asset)
     - Enable unified handling across Position Ledger
     - Support products-as-assets scenario
-  - [ ] 1.5 Implement serde + prost serialization for all types
+  - [x] 1.5 Implement serde + prost serialization for all types
     - JSON serialization via serde
     - Protobuf serialization via prost (standard with quant library)
-  - [ ] 1.6 Ensure domain model tests pass
+  - [x] 1.6 Ensure domain model tests pass
     - Run ONLY the 4-6 tests written in 1.1
 
 **Acceptance Criteria:**
@@ -60,22 +60,22 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Group 1
 **Complexity:** L
 
-- [ ] 2.0 Complete trigger type system
-  - [ ] 2.1 Write 4-6 focused tests for trigger types
+- [x] 2.0 Complete trigger type system
+  - [x] 2.1 Write 4-6 focused tests for trigger types
     - Test TriggerType enum serialization roundtrip
     - Test TriggerInfo construction for each category (time-based, price-based, exercise, corporate action)
     - Test fixing subtypes (initial, final, periodic, reset)
     - Test BarrierDirection (Up, Down) behavior
-  - [ ] 2.2 Define TriggerType enum with 8 variants
+  - [x] 2.2 Define TriggerType enum with 8 variants
     - Time-based: Expiry, CouponPayment
     - Price observation: Fixing (with FixingType subtype)
     - Discrete barrier: Barrier
     - Continuous barrier: ContinuousBarrier
     - Exercise: AmericanExercise
     - Corporate actions: Dividend, StockSplit
-  - [ ] 2.3 Define FixingType enum
+  - [x] 2.3 Define FixingType enum
     - Initial, Final, Periodic, Reset variants
-  - [ ] 2.4 Define TriggerInfo struct
+  - [x] 2.4 Define TriggerInfo struct
     - trigger_type: TriggerType
     - trigger_time: DateTime<Utc>
     - observed_price: Option<Decimal> (for fixings - passed by Event Framework)
@@ -83,10 +83,10 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
     - barrier_level: Option<Decimal>
     - barrier_direction: Option<BarrierDirection>
     - corporate_action_details: Option<CorporateActionDetails>
-  - [ ] 2.5 Define trigger-product mapping as configuration
+  - [x] 2.5 Define trigger-product mapping as configuration
     - Which triggers apply to which products
     - Reference product-to-trigger matrix from requirements
-  - [ ] 2.6 Ensure trigger type tests pass
+  - [x] 2.6 Ensure trigger type tests pass
     - Run ONLY the 4-6 tests written in 2.1
 
 **Acceptance Criteria:**
@@ -102,19 +102,19 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Complexity:** M
 **Critical Note:** This MUST be implemented BEFORE the in-memory ledger
 
-- [ ] 3.0 Complete ledger abstraction layer
-  - [ ] 3.1 Write 4-6 focused tests for ledger traits
+- [x] 3.0 Complete ledger abstraction layer
+  - [x] 3.1 Write 4-6 focused tests for ledger traits
     - Test trait object creation and basic method signatures
     - Test Position struct construction with tags
     - Test Move struct construction with inherited tags
     - Test LedgerError variants
-  - [ ] 3.2 Define Position struct
+  - [x] 3.2 Define Position struct
     - id: PositionId
     - wallet_id: WalletId
     - instrument: Instrument (from Group 1)
     - quantity: Decimal
     - tags: HashMap<TagKey, TagValue> (for portfolio system)
-  - [ ] 3.3 Define Move struct
+  - [x] 3.3 Define Move struct
     - id: MoveId
     - position_id: PositionId
     - move_type: MoveType
@@ -126,19 +126,19 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
     - rule_applied: MoveRuleRef (audit trail)
     - context_snapshot: HashMap<String, String>
     - inherited_tags: HashMap<TagKey, TagValue>
-  - [ ] 3.4 Define LedgerReader trait
+  - [x] 3.4 Define LedgerReader trait
     - get_position(&self, id: &PositionId) -> Result<Position>
     - get_positions_by_wallet(&self, wallet_id: &WalletId) -> Result<Vec<Position>>
     - get_balance(&self, position_id: &PositionId) -> Result<Decimal>
     - positions_by_portfolio(&self, filter: &PortfolioFilter) -> Result<Vec<Position>>
     - moves_by_portfolio(&self, filter: &PortfolioFilter) -> Result<Vec<Move>>
-  - [ ] 3.5 Define LedgerWriter trait
+  - [x] 3.5 Define LedgerWriter trait
     - create_position(&mut self, position: Position) -> Result<PositionId>
     - record_moves(&mut self, moves: Vec<Move>) -> Result<()>
-  - [ ] 3.6 Define Ledger trait (combines LedgerReader + LedgerWriter)
+  - [x] 3.6 Define Ledger trait (combines LedgerReader + LedgerWriter)
     - Trait bounds: LedgerReader + LedgerWriter
     - Enable future persistent implementations
-  - [ ] 3.7 Ensure ledger abstraction tests pass
+  - [x] 3.7 Ensure ledger abstraction tests pass
     - Run ONLY the 4-6 tests written in 3.1
 
 **Acceptance Criteria:**
@@ -155,32 +155,32 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 1, 2
 **Complexity:** L
 
-- [ ] 4.0 Complete ProductAction types and Call 1 interface
-  - [ ] 4.1 Write 4-6 focused tests for ProductAction
+- [x] 4.0 Complete ProductAction types and Call 1 interface
+  - [x] 4.1 Write 4-6 focused tests for ProductAction
     - Test ActionType enum serialization
     - Test ProductAction construction with all fields
     - Test PositionSelector enum variants
     - Test ProductActionRef lineage tracking
-  - [ ] 4.2 Define ActionType enum
+  - [x] 4.2 Define ActionType enum
     - CouponPayment, Settlement, BarrierBreach
     - EarlyExercise, DividendAdjustment, StockSplitAdjustment
     - FixingObserved, HedgeUnwind, HedgeRebalance
-  - [ ] 4.3 Define ProductAction struct
+  - [x] 4.3 Define ProductAction struct
     - action_type: ActionType
     - amount_per_unit: Option<Decimal>
     - settlement_date: Option<Date>
     - details: ActionDetails (enum for type-specific data)
     - source_action_ref: Option<ProductActionRef> (for event chaining)
     - target_selector: Option<PositionSelector> (for downstream targeting)
-  - [ ] 4.4 Define PositionSelector enum
+  - [x] 4.4 Define PositionSelector enum
     - SameAsSource (default)
     - LinkedHedges { source_product_id: ProductId }
     - Specific { position_ids: Vec<PositionId> }
     - ByQuery { filter: PortfolioFilter }
-  - [ ] 4.5 Define ProductActionCalculator trait (Call 1 interface)
+  - [x] 4.5 Define ProductActionCalculator trait (Call 1 interface)
     - fn get_product_action(&self, trigger_info: &TriggerInfo, product: &Product, quant_lib: &dyn QuantLib) -> Result<ProductAction>
-  - [ ] 4.6 Implement serde + prost serialization for ProductAction types
-  - [ ] 4.7 Ensure ProductAction tests pass
+  - [x] 4.6 Implement serde + prost serialization for ProductAction types
+  - [x] 4.7 Ensure ProductAction tests pass
     - Run ONLY the 4-6 tests written in 4.1
 
 **Acceptance Criteria:**
@@ -195,38 +195,38 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 3, 4
 **Complexity:** L
 
-- [ ] 5.0 Complete MoveRules engine
-  - [ ] 5.1 Write 4-6 focused tests for MoveRules
+- [x] 5.0 Complete MoveRules engine
+  - [x] 5.1 Write 4-6 focused tests for MoveRules
     - Test RuleCondition matching (Equals, In, Exists, Not)
     - Test DirectBooking pattern application
     - Test WashBookRouting pattern (3-leg entry)
     - Test Split pattern with percentage allocation
-  - [ ] 5.2 Define MoveRuleContext struct
+  - [x] 5.2 Define MoveRuleContext struct
     - attributes: HashMap<String, String>
     - Support dimensions: legal_entity, product_type, jurisdiction, accounting_standard, business_line, client_type, book_type
-  - [ ] 5.3 Define RuleCondition enum
+  - [x] 5.3 Define RuleCondition enum
     - Equals { attribute: String, value: String }
     - In { attribute: String, values: Vec<String> }
     - Exists { attribute: String }
     - Not(Box<RuleCondition>)
-  - [ ] 5.4 Define BookingPattern enum (6 patterns)
+  - [x] 5.4 Define BookingPattern enum (6 patterns)
     - DirectBooking { debit_account, credit_account }
     - WashBookRouting { source, wash_book, destination }
     - Split { entries: Vec<SplitEntry> }
     - TaxWithholding { gross, tax, net, tax_rate_lookup }
     - Composite { patterns: Vec<BookingPattern> }
     - Custom { rule_id, parameters }
-  - [ ] 5.5 Define MoveRule struct
+  - [x] 5.5 Define MoveRule struct
     - conditions: Vec<RuleCondition>
     - booking_pattern: BookingPattern
-  - [ ] 5.6 Implement rule matching logic
+  - [x] 5.6 Implement rule matching logic
     - Match context against RuleConditions
     - All conditions must match (AND logic)
-  - [ ] 5.7 Implement booking pattern application
+  - [x] 5.7 Implement booking pattern application
     - Generate Move entries based on pattern type
     - Scale amounts by position quantity
     - Populate audit trail fields
-  - [ ] 5.8 Ensure MoveRules tests pass
+  - [x] 5.8 Ensure MoveRules tests pass
     - Run ONLY the 4-6 tests written in 5.1
 
 **Acceptance Criteria:**
@@ -241,31 +241,31 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 3, 4, 5
 **Complexity:** L
 
-- [ ] 6.0 Complete Call 2 interface with event chaining
-  - [ ] 6.1 Write 4-6 focused tests for Call 2
+- [x] 6.0 Complete Call 2 interface with event chaining
+  - [x] 6.1 Write 4-6 focused tests for Call 2
     - Test ApplyResult construction with moves and downstream_actions
     - Test MoveApplicator with DirectBooking (single position)
     - Test MoveApplicator with WashBookRouting pattern
     - Test downstream action generation (barrier breach -> settlement)
-  - [ ] 6.2 Define PositionWithContext struct
+  - [x] 6.2 Define PositionWithContext struct
     - position: Position
     - context: MoveRuleContext
     - applicable_rules: Vec<MoveRule> (pre-matched by Event Framework)
-  - [ ] 6.3 Define ApplyResult struct
+  - [x] 6.3 Define ApplyResult struct
     - moves: Vec<Move>
     - downstream_actions: Vec<ProductAction>
-  - [ ] 6.4 Define MoveApplicator trait (Call 2 interface)
+  - [x] 6.4 Define MoveApplicator trait (Call 2 interface)
     - fn apply_to_positions(&self, product_action: &ProductAction, positions: &[PositionWithContext], move_rules: &[MoveRule]) -> Result<ApplyResult>
-  - [ ] 6.5 Implement MoveApplicator
+  - [x] 6.5 Implement MoveApplicator
     - Apply ProductAction to each position
     - Scale amount_per_unit by position quantity
     - Apply matched MoveRules to generate moves
     - Identify downstream ProductActions based on action_type
     - Set source_action_ref for lineage
-  - [ ] 6.6 Implement downstream action logic for thin slice
+  - [x] 6.6 Implement downstream action logic for thin slice
     - BarrierBreach -> Settlement downstream action
     - Populate target_selector appropriately
-  - [ ] 6.7 Ensure Call 2 tests pass
+  - [x] 6.7 Ensure Call 2 tests pass
     - Run ONLY the 4-6 tests written in 6.1
 
 **Acceptance Criteria:**
@@ -282,26 +282,26 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Group 3
 **Complexity:** M
 
-- [ ] 7.0 Complete in-memory ledger implementation
-  - [ ] 7.1 Write 4-6 focused tests for in-memory ledger
+- [x] 7.0 Complete in-memory ledger implementation
+  - [x] 7.1 Write 4-6 focused tests for in-memory ledger
     - Test position creation and retrieval
     - Test move recording and balance calculation
     - Test portfolio filtering with tag criteria
     - Test wallet-scoped position queries
-  - [ ] 7.2 Implement InMemoryLedger struct
+  - [x] 7.2 Implement InMemoryLedger struct
     - positions: HashMap<PositionId, Position>
     - moves: Vec<Move>
     - wallets: HashMap<WalletId, Wallet>
-  - [ ] 7.3 Implement LedgerReader for InMemoryLedger
+  - [x] 7.3 Implement LedgerReader for InMemoryLedger
     - get_position: O(1) lookup
     - get_positions_by_wallet: filter by wallet_id
     - get_balance: sum moves for position
     - positions_by_portfolio: filter by tag criteria
     - moves_by_portfolio: filter moves by position tags
-  - [ ] 7.4 Implement LedgerWriter for InMemoryLedger
+  - [x] 7.4 Implement LedgerWriter for InMemoryLedger
     - create_position: generate ID, store position
     - record_moves: append moves, update balances
-  - [ ] 7.5 Ensure in-memory ledger tests pass
+  - [x] 7.5 Ensure in-memory ledger tests pass
     - Run ONLY the 4-6 tests written in 7.1
 
 **Acceptance Criteria:**
@@ -316,36 +316,36 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 4, 5, 6, 7
 **Complexity:** XL
 
-- [ ] 8.0 Complete thin slice with continuous barrier products
-  - [ ] 8.1 Write 6-8 focused tests for thin slice
+- [x] 8.0 Complete thin slice with continuous barrier products
+  - [x] 8.1 Write 6-8 focused tests for thin slice
     - Test Knock-Out Warrant barrier breach flow (Call 1 -> ProductAction)
     - Test Knock-Out Warrant move generation (Call 2 -> ApplyResult)
     - Test Mini Certificate barrier breach with event chaining
     - Test fixing trigger (initial fixing sets strike)
     - Test expiry trigger with settlement
     - Test DirectBooking and WashBookRouting patterns on knockout
-  - [ ] 8.2 Implement KnockOutWarrant product handler
+  - [x] 8.2 Implement KnockOutWarrant product handler
     - Process ContinuousBarrier trigger -> BarrierBreach action
     - Process Fixing trigger -> FixingObserved action
     - Process Expiry trigger -> Settlement action
     - Generate Settlement downstream action on barrier breach
-  - [ ] 8.3 Implement MiniCertificate product handler
+  - [x] 8.3 Implement MiniCertificate product handler
     - Similar to KnockOutWarrant with Mini-specific logic
     - Continuous barrier monitoring
     - Event chaining on knockout
-  - [ ] 8.4 Configure MoveRules for thin slice (at least 3 patterns)
+  - [x] 8.4 Configure MoveRules for thin slice (at least 3 patterns)
     - DirectBooking: Standard knockout/settlement
     - WashBookRouting: Intercompany settlement
     - Split: Multi-desk P&L allocation
-  - [ ] 8.5 Implement full two-call flow
+  - [x] 8.5 Implement full two-call flow
     - Call 1: TriggerInfo + Product -> ProductAction
     - Call 2: ProductAction + Positions + Rules -> ApplyResult
     - Event chaining: Process downstream_actions recursively (simulated)
-  - [ ] 8.6 Implement JSON and Protobuf serialization for output
+  - [x] 8.6 Implement JSON and Protobuf serialization for output
     - Moves serializable to JSON via serde
     - Moves serializable to Protobuf via prost
     - ApplyResult fully serializable
-  - [ ] 8.7 Ensure thin slice tests pass
+  - [x] 8.7 Ensure thin slice tests pass
     - Run ONLY the 6-8 tests written in 8.1
 
 **Acceptance Criteria:**
@@ -363,31 +363,31 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 2, 4
 **Complexity:** L
 
-- [ ] 9.0 Complete stubs for external dependencies
-  - [ ] 9.1 Write 4-6 focused tests for stubs
+- [x] 9.0 Complete stubs for external dependencies
+  - [x] 9.1 Write 4-6 focused tests for stubs
     - Test EventFrameworkStub trigger registration
     - Test EventFrameworkStub callback dispatch simulation
     - Test QuantLibStub product action calculation
     - Test two-call orchestration flow
-  - [ ] 9.2 Define QuantLib trait
+  - [x] 9.2 Define QuantLib trait
     - fn get_action(&self, product: &Product, trigger_data: &TriggerInfo) -> Result<ProductAction>
-  - [ ] 9.3 Implement QuantLibStub
+  - [x] 9.3 Implement QuantLibStub
     - Return mock ProductActions for thin slice products
     - Support all trigger types needed for testing
-  - [ ] 9.4 Define EventFramework trait
+  - [x] 9.4 Define EventFramework trait
     - fn register_trigger(&mut self, registration: TriggerRegistration) -> Result<()>
     - fn simulate_trigger(&self, trigger_info: TriggerInfo) -> Result<()>
-  - [ ] 9.5 Implement EventFrameworkStub
+  - [x] 9.5 Implement EventFrameworkStub
     - Store trigger registrations
     - Simulate trigger dispatch with mock positions
     - Build mock MoveRuleContext for positions
     - Pre-match MoveRules based on context
     - Orchestrate two-call pattern
     - Handle downstream_actions recursively (with max depth)
-  - [ ] 9.6 Implement recursion safety in stub
+  - [x] 9.6 Implement recursion safety in stub
     - Max depth limit (10 levels)
     - Cycle detection (action_type + product_id)
-  - [ ] 9.7 Ensure stub tests pass
+  - [x] 9.7 Ensure stub tests pass
     - Run ONLY the 4-6 tests written in 9.1
 
 **Acceptance Criteria:**
@@ -402,30 +402,30 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 3, 7
 **Complexity:** M
 
-- [ ] 10.0 Complete portfolio tagging system (GAP from Python POC)
-  - [ ] 10.1 Write 4-6 focused tests for portfolio system
+- [x] 10.0 Complete portfolio tagging system (GAP from Python POC)
+  - [x] 10.1 Write 4-6 focused tests for portfolio system
     - Test TagCriterion matching (Equals, In, Exists)
     - Test PortfolioFilter with multiple criteria (AND logic)
     - Test position appearing in multiple portfolio queries
     - Test move tag inheritance from position
-  - [ ] 10.2 Define TagKey and TagValue types
+  - [x] 10.2 Define TagKey and TagValue types
     - TagKey: String (e.g., "strategy", "desk", "trader")
     - TagValue: String (e.g., "yield_enhancement", "desk_a")
-  - [ ] 10.3 Define TagCriterion enum
+  - [x] 10.3 Define TagCriterion enum
     - Equals(TagKey, TagValue)
     - In(TagKey, Vec<TagValue>)
     - Exists(TagKey)
-  - [ ] 10.4 Define PortfolioFilter struct
+  - [x] 10.4 Define PortfolioFilter struct
     - name: String (for named portfolio views)
     - criteria: Vec<TagCriterion> (AND logic)
-  - [ ] 10.5 Implement tag inheritance
+  - [x] 10.5 Implement tag inheritance
     - Wallet default tags copied to new positions
     - Position tags override wallet defaults
     - Move inherits position tags on creation
-  - [ ] 10.6 Implement portfolio query methods on InMemoryLedger
+  - [x] 10.6 Implement portfolio query methods on InMemoryLedger
     - positions_by_portfolio: filter positions by tag criteria
     - moves_by_portfolio: filter moves by inherited tags
-  - [ ] 10.7 Ensure portfolio system tests pass
+  - [x] 10.7 Ensure portfolio system tests pass
     - Run ONLY the 4-6 tests written in 10.1
 
 **Acceptance Criteria:**
@@ -442,16 +442,16 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
 **Dependencies:** Task Groups 1-10
 **Complexity:** M
 
-- [ ] 11.0 Review tests and add critical integration coverage
-  - [ ] 11.1 Review existing tests from Task Groups 1-10
+- [x] 11.0 Review tests and add critical integration coverage
+  - [x] 11.1 Review existing tests from Task Groups 1-10
     - Verify 4-6 tests per group (approximately 48-60 tests total)
     - Identify critical integration gaps
-  - [ ] 11.2 Analyze integration test gaps for THIS feature only
+  - [x] 11.2 Analyze integration test gaps for THIS feature only
     - Focus on end-to-end two-call pattern flows
     - Focus on event chaining scenarios
     - Focus on multi-pattern booking scenarios
     - Do NOT assess entire application test coverage
-  - [ ] 11.3 Write up to 8 additional integration tests
+  - [x] 11.3 Write up to 8 additional integration tests
     - End-to-end: Continuous barrier breach -> moves + downstream settlement
     - End-to-end: Fixing -> settlement flow
     - Integration: Two-call pattern with 3 different booking patterns
@@ -460,7 +460,7 @@ This task breakdown implements the Quantitative Event Engine - a stateless Smart
     - Serialization: Full ApplyResult to JSON roundtrip
     - Serialization: Full ApplyResult to Protobuf roundtrip
     - Stub orchestration: Complete trigger -> moves flow
-  - [ ] 11.4 Run all feature-specific tests
+  - [x] 11.4 Run all feature-specific tests
     - Run tests from Groups 1-10 plus new integration tests
     - Expected total: approximately 56-68 tests
     - Verify all critical workflows pass

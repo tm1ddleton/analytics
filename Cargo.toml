@@ -22,8 +22,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ordered-float = "3.0"
 rayon = "1.8" # Added for parallel execution in pull-mode
+prost = "0.13"  # Protocol buffers support for quant library integration
+rust_decimal = { version = "1.33", features = ["serde"] }  # Precise decimal for financial calculations
+thiserror = "1.0"  # Derive macro for error types
 
 [dev-dependencies]
 env_logger = "0.11"
 petgraph = "0.6"  # For evaluation tests only - daggy selected for implementation
-

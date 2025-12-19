@@ -12,8 +12,28 @@ Build a stateless Smart Contract Adapter library in Rust that processes lifecycl
 
 ## Specific Requirements
 
-**Two-Call Pattern Architecture**
+**Three-Call Pattern Architecture**
+
+The Smart Contract Gateway implements a three-call pattern for the complete product lifecycle:
+
+| Call | When | Input | Output |
+|------|------|-------|--------|
+| **Call 0** | Product created | Product definition | Trigger subscriptions for Event Framework |
+| **Call 1** | Trigger fires | TriggerInfo + Product | ProductAction (unit economics, qty=1) |
+| **Call 2** | Apply to positions | ProductAction + Positions + Rules | ApplyResult (Moves + downstream actions) |
+
+**Call 0: Product Registration (Trigger Subscription)**
+- When a new product is created, Event Framework calls this library to get required trigger subscriptions
+- This library calls Quant Lib to get full product event details (dates, levels, schedules, observation rules)
+- Quant Lib returns verbose, product-specific event information
+- This library transforms Quant Lib output into minimal subscription criteria for Event Framework
+- Event Framework only receives what it needs to monitor (underlying, level, direction, time) - not quant details
+- This library acts as a translator between "quant language" and "monitoring criteria"
+
+**Call 1: Trigger Processing (ProductAction)**
 - Call 1 receives trigger info + product definition, calls Quant Lib stub, returns ProductAction (unit economics, quantity=1)
+
+**Call 2: Position Application (ApplyResult)**
 - Call 2 receives ProductAction + positions with context + MoveRules, returns ApplyResult containing Vec<Move> AND Vec<ProductAction> for downstream chaining
 - Product logic (WHAT happened) is cleanly separated from accounting logic (HOW to book it)
 - This library is stateless - no internal trigger registry or position storage

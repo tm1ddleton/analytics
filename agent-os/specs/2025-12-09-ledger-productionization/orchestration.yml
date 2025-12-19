@@ -1,0 +1,45 @@
+task_groups:
+  - name: Shared Domain Model
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Trigger Type System
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Ledger Abstraction Layer
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: ProductAction and Call 1 Interface
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: MoveRules Engine
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Call 2 Interface and ApplyResult
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: In-Memory Ledger Implementation
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Continuous Barrier Products (Thin Slice)
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Stubs (Event Framework, Quant Lib)
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Portfolio Tagging System
+    claude_code_subagent: implementer
+    standards:
+      - all
+  - name: Test Review & Integration Testing
+    claude_code_subagent: implementer
+    standards:
+      - all
